@@ -1624,7 +1624,7 @@ def capture_username(message):
 
     bot.send_message(
         user_id,
-        f"✅ {username} set.\n\nNow send {REQUIRED_MEDIA} media to join."
+        f"✅ {username} set.")#\n\nNow send {REQUIRED_MEDIA} media to join."
     )
 # =========================
 # 🚫 BANNED WORD CHECK
