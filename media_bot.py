@@ -2342,6 +2342,68 @@ def _process_album(messages):
     # external_forward.forward_album(bot, messages)
 
 
+@bot.message_handler(func=lambda m: m.from_user.id in pending_admin_search_user)
+def handle_admin_search_user(message):
+    if not is_admin(message.chat.id):
+        pending_admin_search_user.discard(message.from_user.id)
+        return
+        
+    query = message.text.strip()
+    if query.lower() == "/cancel":
+        pending_admin_search_user.discard(message.from_user.id)
+        bot.send_message(message.chat.id, "❌ Search cancelled.")
+        return
+        
+    pending_admin_search_user.discard(message.from_user.id)
+    bot.send_message(message.chat.id, "🔍 Searching...")
+    
+    with get_connection() as conn:
+        with conn.cursor() as c:
+            if query.isdigit():
+                c.execute("""
+                    SELECT u.user_id, u.username, u.total_media_sent, COUNT(r.user_id), u.last_activation_time
+                    FROM users u
+                    LEFT JOIN users r ON r.referred_by = u.user_id
+                    WHERE u.user_id = %s
+                    GROUP BY u.user_id
+                """, (int(query),))
+            else:
+                clean_query = query.replace('@', '')
+                c.execute("""
+                    SELECT u.user_id, u.username, u.total_media_sent, COUNT(r.user_id), u.last_activation_time
+                    FROM users u
+                    LEFT JOIN users r ON r.referred_by = u.user_id
+                    WHERE u.username ILIKE %s
+                    GROUP BY u.user_id
+                    LIMIT 20
+                """, (f"%{clean_query}%",))
+            rows = c.fetchall()
+            
+    if not rows:
+        bot.send_message(message.chat.id, "❌ No users found matching your query.")
+        return
+        
+    import time
+    now = int(time.time())
+    markup = InlineKeyboardMarkup(row_width=1)
+    
+    for row in rows:
+        uid, fallback, media, refs, last_active = row[0], row[1], row[2], row[3], row[4]
+        if last_active:
+            time_passed = now - last_active
+            time_left = max(0, get_inactivity_limit() - time_passed)
+            status = f"🟢 {time_left // 3600}h" if time_left > 0 else "🔴"
+        else:
+            status = "🔴"
+            
+        display_name = f"@{fallback}" if fallback else f"ID:{uid}"
+        btn_text = f"{display_name} | {status} | 📸 {media}"
+        markup.add(InlineKeyboardButton(btn_text, callback_data=f"admin_user_info:{uid}:0:all"))
+        
+    markup.add(InlineKeyboardButton("🔙 Back to Panel", callback_data="panel_users"))
+    bot.send_message(message.chat.id, f"🔍 Search Results for `{query}`:", parse_mode="Markdown", reply_markup=markup)
+
+
 @bot.message_handler(
     func=lambda m: m.chat.id in (
         pending_fw_add | pending_fw_remove | pending_vip_add | pending_vip_remove | pending_fw_msg | pending_admin_broadcast | pending_admin_setcaption | pending_admin_setwelcome | pending_admin_setinactive | pending_admin_setcontact | pending_admin_addforward
@@ -4285,66 +4347,7 @@ def admin_callbacks(call):
     bot.answer_callback_query(call.id)
 
 
-@bot.message_handler(func=lambda m: m.from_user.id in pending_admin_search_user)
-def handle_admin_search_user(message):
-    if not is_admin(message.chat.id):
-        pending_admin_search_user.discard(message.from_user.id)
-        return
-        
-    query = message.text.strip()
-    if query.lower() == "/cancel":
-        pending_admin_search_user.discard(message.from_user.id)
-        bot.send_message(message.chat.id, "❌ Search cancelled.")
-        return
-        
-    pending_admin_search_user.discard(message.from_user.id)
-    bot.send_message(message.chat.id, "🔍 Searching...")
-    
-    with get_connection() as conn:
-        with conn.cursor() as c:
-            if query.isdigit():
-                c.execute("""
-                    SELECT u.user_id, u.username, u.total_media_sent, COUNT(r.user_id), u.last_activation_time
-                    FROM users u
-                    LEFT JOIN users r ON r.referred_by = u.user_id
-                    WHERE u.user_id = %s
-                    GROUP BY u.user_id
-                """, (int(query),))
-            else:
-                clean_query = query.replace('@', '')
-                c.execute("""
-                    SELECT u.user_id, u.username, u.total_media_sent, COUNT(r.user_id), u.last_activation_time
-                    FROM users u
-                    LEFT JOIN users r ON r.referred_by = u.user_id
-                    WHERE u.username ILIKE %s
-                    GROUP BY u.user_id
-                    LIMIT 20
-                """, (f"%{clean_query}%",))
-            rows = c.fetchall()
-            
-    if not rows:
-        bot.send_message(message.chat.id, "❌ No users found matching your query.")
-        return
-        
-    import time
-    now = int(time.time())
-    markup = InlineKeyboardMarkup(row_width=1)
-    
-    for row in rows:
-        uid, fallback, media, refs, last_active = row[0], row[1], row[2], row[3], row[4]
-        if last_active:
-            time_passed = now - last_active
-            time_left = max(0, get_inactivity_limit() - time_passed)
-            status = f"🟢 {time_left // 3600}h" if time_left > 0 else "🔴"
-        else:
-            status = "🔴"
-            
-        display_name = f"@{fallback}" if fallback else f"ID:{uid}"
-        btn_text = f"{display_name} | {status} | 📸 {media}"
-        markup.add(InlineKeyboardButton(btn_text, callback_data=f"admin_user_info:{uid}:0:all"))
-        
-    markup.add(InlineKeyboardButton("🔙 Back to Panel", callback_data="panel_users"))
-    bot.send_message(message.chat.id, f"🔍 Search Results for `{query}`:", parse_mode="Markdown", reply_markup=markup)
+
 
 
 @bot.message_handler(commands=['msg'])
@@ -4443,21 +4446,28 @@ def menu_command(message):
             c.execute("SELECT COUNT(*) FROM users WHERE referred_by=%s", (user_id,))
             invites = c.fetchone()[0]
             
-            c.execute("SELECT last_activation_time FROM users WHERE user_id=%s", (user_id,))
+            c.execute("SELECT last_activation_time, joined_at, total_media_sent, username FROM users WHERE user_id=%s", (user_id,))
             row = c.fetchone()
             
-    if row and row[0]:
-        last_act = row[0]
-        time_left = max(0, (last_act + get_inactivity_limit()) - now)
+    if row:
+        last_act, joined_at, total_media_sent, db_username = row
+        time_left = max(0, (last_act + get_inactivity_limit()) - now) if last_act else 0
     else:
-        time_left = 0
+        joined_at, total_media_sent, db_username, time_left = None, 0, None, 0
 
     hours = time_left // 3600
     minutes = (time_left % 3600) // 60
     
+    import datetime
+    join_date_str = datetime.datetime.fromtimestamp(joined_at).strftime('%Y-%m-%d %H:%M') if joined_at else "N/A"
+    display_name = f"@{db_username}" if db_username else (message.from_user.username or message.from_user.first_name)
+
     bot.send_message(
         user_id,
         f"📊 *Your Dashboard*\n\n"
+        f"👤 *User:* {display_name}\n"
+        f"📅 *Joined:* {join_date_str}\n"
+        f"📸 *Media Shared:* {total_media_sent}\n"
         f"👥 *Users Invited:* {invites}\n"
         f"⏳ *Activity Time Left:* {hours}h {minutes}m\n\n"
         f"Use /referral to get your invite link and earn more time (1 invite = +1 hour)!",
