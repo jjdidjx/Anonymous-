@@ -2300,7 +2300,6 @@ def _process_album(messages):
     media_caption = get_media_caption()
     username = get_username(sender_id) or 'Unknown'
     media_items = []
-    channel_media_items = []
     
     for index, msg in enumerate(messages):
         new_caption = None
@@ -2330,12 +2329,6 @@ def _process_album(messages):
                 ),
                 msg.message_id,
             ))
-            # Special items for channels
-            channel_cap = f"👤 {username}\n{msg.caption or ''}".strip() if index == 0 else None
-            channel_media_items.append((
-                InputMediaPhoto(media=msg.photo[-1].file_id, caption=channel_cap),
-                msg.message_id
-            ))
         elif msg.content_type == "video":
             media_items.append((
                 InputMediaVideo(
@@ -2345,21 +2338,25 @@ def _process_album(messages):
                 ),
                 msg.message_id,
             ))
-            # Special items for channels
-            channel_cap = f"👤 {username}\n{msg.caption or ''}".strip() if index == 0 else None
-            channel_media_items.append((
-                InputMediaVideo(media=msg.video.file_id, caption=channel_cap),
-                msg.message_id
-            ))
 
     chunks = [media_items[i:i+10] for i in range(0, len(media_items), 10)]
-    channel_chunks = [channel_media_items[i:i+10] for i in range(0, len(channel_media_items), 10)]
 
     def send_album_to_user(user_id):
         rows = []
-        target_chunks = channel_chunks if user_id in extra_targets else chunks
+        
+        if user_id in extra_targets:
+            # Forward each message to group/channel to preserve forward tag and original caption
+            for msg in messages:
+                try:
+                    sent = _forward_message_with_retry(user_id, sender_id, msg.message_id)
+                    if store_mapping and sent:
+                        rows.append((sent.message_id, sender_id, msg.message_id, user_id, now))
+                except Exception as e:
+                    print("Album forward error:", e)
+            return rows
 
-        for chunk in target_chunks:
+        # For normal users, send as anonymous relay (copy)
+        for chunk in chunks:
             chunk_media = [item[0] for item in chunk]
             try:
                 sent_msgs = bot.send_media_group(user_id, chunk_media)
