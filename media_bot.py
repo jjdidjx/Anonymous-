@@ -2298,7 +2298,9 @@ def _process_album(messages):
     if not targets:
         return
     media_caption = get_media_caption()
+    username = get_username(sender_id) or 'Unknown'
     media_items = []
+    channel_media_items = []
     
     for index, msg in enumerate(messages):
         new_caption = None
@@ -2328,6 +2330,12 @@ def _process_album(messages):
                 ),
                 msg.message_id,
             ))
+            # Special items for channels
+            channel_cap = f"👤 {username}\n{msg.caption or ''}".strip() if index == 0 else None
+            channel_media_items.append((
+                InputMediaPhoto(media=msg.photo[-1].file_id, caption=channel_cap),
+                msg.message_id
+            ))
         elif msg.content_type == "video":
             media_items.append((
                 InputMediaVideo(
@@ -2337,21 +2345,21 @@ def _process_album(messages):
                 ),
                 msg.message_id,
             ))
+            # Special items for channels
+            channel_cap = f"👤 {username}\n{msg.caption or ''}".strip() if index == 0 else None
+            channel_media_items.append((
+                InputMediaVideo(media=msg.video.file_id, caption=channel_cap),
+                msg.message_id
+            ))
+
     chunks = [media_items[i:i+10] for i in range(0, len(media_items), 10)]
+    channel_chunks = [channel_media_items[i:i+10] for i in range(0, len(channel_media_items), 10)]
 
     def send_album_to_user(user_id):
         rows = []
-        if user_id in extra_targets:
-            for msg in messages:
-                try:
-                    sent = _forward_message_with_retry(user_id, sender_id, msg.message_id)
-                    if store_mapping and sent:
-                        rows.append((sent.message_id, sender_id, msg.message_id, user_id, now))
-                except Exception as e:
-                    print("Album forward error:", e)
-            return rows
+        target_chunks = channel_chunks if user_id in extra_targets else chunks
 
-        for chunk in chunks:
+        for chunk in target_chunks:
             chunk_media = [item[0] for item in chunk]
             try:
                 sent_msgs = bot.send_media_group(user_id, chunk_media)
@@ -3246,18 +3254,19 @@ def stats_command(message):
     bot.send_message(
         message.chat.id,
         f"""
-📊 BOT STATS
+💎 *BOT STATISTICS* 💎
 
-👥 Total: {total}
-🟢 Active: {active}
-🔴 Inactive: {inactive}
-⏳ Activity Limit: {get_inactivity_limit() // 3600} hours
-🚫 Banned: {banned}
-⭐ Whitelisted: {whitelisted}
-♻ Duplicate Media: {duplicate_total}
-📦 Message Map Rows: {map_count}
-🚪 Join: {join_status}
-        """
+👥 *Total Users:* {total}
+🟢 *Active Users:* {active}
+⏳ *Inactive:* {inactive}
+⏰ *Activity Window:* {get_inactivity_limit() // 3600}h
+🚫 *Banned:* {banned}
+🌟 *VIP / Whitelist:* {whitelisted}
+♻️ *Duplicates Prevented:* {duplicate_total}
+📂 *Mapped Messages:* {map_count}
+🚪 *Join Status:* {join_status}
+        """,
+        parse_mode="Markdown"
     )
 @bot.message_handler(commands=['info'])
 def info_command(message):
@@ -3958,9 +3967,23 @@ def panel_navigation_callbacks(call):
 
     if call.data == "panel_users":
         bot.answer_callback_query(call.id)
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute("SELECT COUNT(*) FROM users")
+                total_users = c.fetchone()[0]
+                c.execute("SELECT COUNT(*) FROM users WHERE referred_by IS NOT NULL")
+                invited_users = c.fetchone()[0]
+
+        panel_text = (
+            "👥 *Users Panel*\n\n"
+            f"📈 *Total Users:* `{total_users}`\n"
+            f"✉️ *Invited Users:* `{invited_users}`\n\n"
+            "Manage all users, view activity, or check the leaderboard."
+        )
+        
         _panel_send_or_edit(
             call.message.chat.id,
-            "👥 *Users Panel*",
+            panel_text,
             _panel_users_markup(),
             message_id=call.message.message_id,
         )
@@ -4405,15 +4428,15 @@ def admin_callbacks(call):
         return
 
     elif data == "admin_leaderboard":
-        bot.send_message(call.message.chat.id, "🔄 Fetching leaderboard...")
+        bot.answer_callback_query(call.id, "Fetching leaderboard...")
         with get_connection() as conn:
             with conn.cursor() as c:
                 c.execute("""
-                    SELECT u.user_id, u.username, COUNT(r.user_id) as refs
+                    SELECT u.user_id, u.username, u.first_name, u.last_name, COUNT(r.user_id) as refs
                     FROM users u
                     LEFT JOIN users r ON r.referred_by = u.user_id
-                    WHERE u.username IS NOT NULL
-                    GROUP BY u.user_id, u.username
+                    WHERE u.username IS NOT NULL OR u.first_name IS NOT NULL
+                    GROUP BY u.user_id, u.username, u.first_name, u.last_name
                     HAVING COUNT(r.user_id) > 0
                     ORDER BY refs DESC
                     LIMIT 20
@@ -4423,18 +4446,14 @@ def admin_callbacks(call):
         if rows:
             lines = ["🏆 *Top Referrers Leaderboard*", ""]
             for i, row in enumerate(rows, 1):
-                uid, fallback, refs = row[0], row[1], row[2]
-                display_name = f"@{fallback}"
-                try:
-                    chat = bot.get_chat(uid)
-                    if chat.username:
-                        display_name = f"@{chat.username}"
-                    else:
-                        full = f"{chat.first_name or ''} {chat.last_name or ''}".strip()
-                        if full: display_name = full
-                except Exception:
-                    pass
-                lines.append(f"{i}. {display_name} - {refs} invites")
+                uid, username, fname, lname, refs = row
+                
+                if username:
+                    display_name = f"@{username}"
+                else:
+                    display_name = f"{fname or ''} {lname or ''}".strip() or f"User {uid}"
+                    
+                lines.append(f"{i}. {display_name} - *{refs}* invites")
             text = "\n".join(lines)
         else:
             text = "No referrals yet."
