@@ -45,6 +45,18 @@ def get_inactivity_limit():
         pass
     return 6 * 3600  # 6 hours base fallback
 
+def get_new_user_grace_hours():
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute("SELECT value FROM settings WHERE key='new_user_grace_hours'")
+                row = c.fetchone()
+                if row and row[0].isdigit():
+                    return int(row[0])
+    except Exception:
+        pass
+    return 1  # 1 hour base fallback
+
 FORWARD_DELAY = float(os.getenv("FORWARD_DELAY", "0.01"))
 SEND_MAX_WORKERS = int(os.getenv("SEND_MAX_WORKERS", "8"))
 SEND_RETRIES = int(os.getenv("SEND_RETRIES", "2"))
@@ -548,7 +560,8 @@ def add_referral_bonus(user_id):
             """, (new_last_time, user_id))
 def add_user(user_id, first_name=None, last_name=None):
     now = int(time.time())
-    free_activation_time = now - get_inactivity_limit() + 3600
+    grace_seconds = get_new_user_grace_hours() * 3600
+    free_activation_time = now - get_inactivity_limit() + grace_seconds
     
     with get_connection() as conn:
         with conn.cursor() as c:
@@ -3063,10 +3076,16 @@ def _panel_users_markup():
     )
     markup.add(
         InlineKeyboardButton("🔍 Search User", callback_data="admin_search_user"),
-        InlineKeyboardButton("🏆 Leaderboard", callback_data="admin_leaderboard"),
+        InlineKeyboardButton("🏆 Ref Leaderboard", callback_data="admin_leaderboard"),
+    )
+    markup.add(
+        InlineKeyboardButton("📸 Upload Leaderboard", callback_data="admin_uploader_leaderboard")
     )
     markup.add(
         InlineKeyboardButton("⏳ Set Limit", callback_data="admin_setlimit"),
+        InlineKeyboardButton("🎁 Set Grace", callback_data="admin_setgrace")
+    )
+    markup.add(
         InlineKeyboardButton("🚫 Banned List", callback_data="admin_banned")
     )
     markup.add(InlineKeyboardButton("🔙 Back", callback_data="panel_back"))
@@ -3217,6 +3236,29 @@ def set_limit_command(message):
     bot.send_message(message.chat.id, f"✅ Inactivity limit updated to {hours} hours.{revived_msg}")
 
 
+@bot.message_handler(commands=['setgrace'])
+def set_grace_command(message):
+    if not is_admin(message.chat.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        bot.send_message(message.chat.id, "❌ Usage: /setgrace <hours>\n(Set to 0 to require 12 media immediately)")
+        return
+    
+    hours = int(parts[1])
+    with get_connection() as conn:
+        with conn.cursor() as c:
+            c.execute(
+                """
+                INSERT INTO settings(key, value)
+                VALUES('new_user_grace_hours', %s)
+                ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
+                """, (str(hours),)
+            )
+            
+    bot.send_message(message.chat.id, f"✅ New user grace period updated to {hours} hours.")
+
+
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
 
@@ -3268,6 +3310,8 @@ def stats_command(message):
             map_count = c.fetchone()[0]
             c.execute("SELECT COALESCE(SUM(duplicate_count), 0) FROM media_duplicates")
             duplicate_total = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM users WHERE total_media_sent = 0")
+            zero_media_users = c.fetchone()[0]
     join_status = "OPEN" if is_join_open() else "CLOSED"
 
     bot.send_message(
@@ -3281,6 +3325,7 @@ def stats_command(message):
 ⏰ *Activity Window:* {get_inactivity_limit() // 3600}h
 🚫 *Banned:* {banned}
 🌟 *VIP / Whitelist:* {whitelisted}
+🆕 *0-Media Users:* {zero_media_users}
 ♻️ *Duplicates Prevented:* {duplicate_total}
 📂 *Mapped Messages:* {map_count}
 🚪 *Join Status:* {join_status}
@@ -3852,6 +3897,9 @@ def admin_menu(message):
 
 ⏳ /setlimit HOURS  
 → Set inactivity limit (hours)
+
+🎁 /setgrace HOURS  
+→ Set new user grace period (0 = none)
 
 🔎 /info USER_ID  
 → View user details
@@ -4446,6 +4494,14 @@ def admin_callbacks(call):
         bot.answer_callback_query(call.id)
         return
 
+    elif data == "admin_setgrace":
+        curr = get_new_user_grace_hours()
+        bot.send_message(call.message.chat.id, f"🎁 The current new user grace period is *{curr} hours*.\n\nTo change it, type:\n`/setgrace HOURS`\n\nSet to 0 to make users send 12 media immediately upon joining.", parse_mode="Markdown")
+        bot.answer_callback_query(call.id)
+        return
+
+        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
+
     elif data == "admin_leaderboard":
         bot.answer_callback_query(call.id, "Fetching leaderboard...")
         with get_connection() as conn:
@@ -4476,6 +4532,36 @@ def admin_callbacks(call):
             text = "\n".join(lines)
         else:
             text = "No referrals yet."
+            
+        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
+
+    elif data == "admin_uploader_leaderboard":
+        bot.answer_callback_query(call.id, "Fetching upload leaderboard...")
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute("""
+                    SELECT user_id, username, first_name, last_name, total_media_sent
+                    FROM users
+                    WHERE total_media_sent > 0
+                    ORDER BY total_media_sent DESC
+                    LIMIT 20
+                """)
+                rows = c.fetchall()
+        
+        if rows:
+            lines = ["📸 *Top Uploaders Leaderboard*", ""]
+            for i, row in enumerate(rows, 1):
+                uid, username, fname, lname, uploads = row
+                
+                if username:
+                    display_name = f"@{username}"
+                else:
+                    display_name = f"{fname or ''} {lname or ''}".strip() or f"User {uid}"
+                    
+                lines.append(f"{i}. {display_name} - *{uploads}* uploads")
+            text = "\n".join(lines)
+        else:
+            text = "No uploads yet."
             
         bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
 
