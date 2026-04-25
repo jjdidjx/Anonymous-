@@ -4539,7 +4539,10 @@ def admin_callbacks(call):
         else:
             text = "No referrals yet."
             
-        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("🔙 Back to Leaderboards", callback_data="admin_leaderboards_menu"))
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        return
 
     elif data == "admin_uploader_leaderboard":
         bot.answer_callback_query(call.id, "Fetching upload leaderboard...")
@@ -4569,7 +4572,10 @@ def admin_callbacks(call):
         else:
             text = "No uploads yet."
             
-        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("🔙 Back to Leaderboards", callback_data="admin_leaderboards_menu"))
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        return
 
     elif data == "admin_export_recovery":
         payload = export_recovery_payload()
