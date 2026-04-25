@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import psycopg2
 from psycopg2 import pool as pg_pool
 from psycopg2.extras import execute_values
+import requests
 import telebot
 from telebot.types import InputMediaPhoto, InputMediaVideo
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -2078,6 +2079,29 @@ def _forward_message_with_retry(user_id, sender_id, message_id, **kwargs):
     return None
 
 
+def _forward_messages_manual(chat_id, from_chat_id, message_ids):
+    """
+    Manual call to forwardMessages API to preserve album grouping.
+    Required because local telebot version < 4.14 doesn't support it.
+    """
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/forwardMessages"
+    payload = {
+        "chat_id": chat_id,
+        "from_chat_id": from_chat_id,
+        "message_ids": message_ids
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+        res = resp.json()
+        if res.get("ok"):
+            return res.get("result")
+        else:
+            print(f"Manual forwardMessages failed: {res.get('description')}")
+    except Exception as e:
+        print(f"Manual forwardMessages error: {e}")
+    return None
+
+
 def _send_text_with_retry(user_id, text, reply_to_message_id=None):
     attempts = max(0, SEND_RETRIES) + 1
     for i in range(attempts):
@@ -2345,14 +2369,12 @@ def _process_album(messages):
         rows = []
         
         if user_id in extra_targets:
-            # Forward each message to group/channel to preserve forward tag and original caption
-            for msg in messages:
-                try:
-                    sent = _forward_message_with_retry(user_id, sender_id, msg.message_id)
-                    if store_mapping and sent:
-                        rows.append((sent.message_id, sender_id, msg.message_id, user_id, now))
-                except Exception as e:
-                    print("Album forward error:", e)
+            # Use forwardMessages API to preserve album grouping and forward tags
+            message_ids = [msg.message_id for msg in messages]
+            sent_msgs = _forward_messages_manual(user_id, sender_id, message_ids)
+            if store_mapping and sent_msgs:
+                for sent, original_msg in zip(sent_msgs, messages):
+                    rows.append((sent['message_id'], sender_id, original_msg.message_id, user_id, now))
             return rows
 
         # For normal users, send as anonymous relay (copy)
