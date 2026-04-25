@@ -171,6 +171,7 @@ def init_db():
                     last_activation_time BIGINT
                 )
             """)
+            c.execute("CREATE INDEX IF NOT EXISTS idx_users_total_media ON users(total_media_sent DESC)")
             c.execute("""
                 ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS referred_by BIGINT
@@ -4546,35 +4547,38 @@ def admin_callbacks(call):
 
     elif data == "admin_uploader_leaderboard":
         bot.answer_callback_query(call.id, "Fetching upload leaderboard...")
-        with get_connection() as conn:
-            with conn.cursor() as c:
-                c.execute("""
-                    SELECT user_id, username, first_name, last_name, total_media_sent
-                    FROM users
-                    WHERE total_media_sent > 0
-                    ORDER BY total_media_sent DESC
-                    LIMIT 20
-                """)
-                rows = c.fetchall()
-        
-        if rows:
-            lines = ["📸 *Top Uploaders Leaderboard*", ""]
-            for i, row in enumerate(rows, 1):
-                uid, username, fname, lname, uploads = row
-                
-                if username:
-                    display_name = f"@{username}"
-                else:
-                    display_name = f"{fname or ''} {lname or ''}".strip() or f"User {uid}"
-                    
-                lines.append(f"{i}. {display_name} - *{uploads}* uploads")
-            text = "\n".join(lines)
-        else:
-            text = "No uploads yet."
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as c:
+                    c.execute("""
+                        SELECT user_id, username, first_name, last_name, total_media_sent
+                        FROM users
+                        WHERE total_media_sent IS NOT NULL AND total_media_sent > 0
+                        ORDER BY total_media_sent DESC
+                        LIMIT 20
+                    """)
+                    rows = c.fetchall()
             
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("🔙 Back to Leaderboards", callback_data="admin_leaderboards_menu"))
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+            if rows:
+                lines = ["📸 *Top Uploaders Leaderboard*", ""]
+                for i, row in enumerate(rows, 1):
+                    uid, username, fname, lname, uploads = row
+                    
+                    if username:
+                        display_name = f"@{username}"
+                    else:
+                        display_name = f"{fname or ''} {lname or ''}".strip() or f"User {uid}"
+                        
+                    lines.append(f"{i}. {display_name} - *{uploads}* uploads")
+                text = "\n".join(lines)
+            else:
+                text = "No uploads yet."
+                
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("🔙 Back to Leaderboards", callback_data="admin_leaderboards_menu"))
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        except Exception as e:
+            bot.send_message(call.message.chat.id, f"❌ Error loading uploader leaderboard: {e}")
         return
 
     elif data == "admin_export_recovery":
