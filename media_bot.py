@@ -3076,10 +3076,7 @@ def _panel_users_markup():
     )
     markup.add(
         InlineKeyboardButton("🔍 Search User", callback_data="admin_search_user"),
-        InlineKeyboardButton("🏆 Ref Leaderboard", callback_data="admin_leaderboard"),
-    )
-    markup.add(
-        InlineKeyboardButton("📸 Upload Leaderboard", callback_data="admin_uploader_leaderboard")
+        InlineKeyboardButton("🏆 Leaderboards", callback_data="admin_leaderboards_menu")
     )
     markup.add(
         InlineKeyboardButton("⏳ Set Limit", callback_data="admin_setlimit"),
@@ -4500,7 +4497,16 @@ def admin_callbacks(call):
         bot.answer_callback_query(call.id)
         return
 
-        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
+    elif data == "admin_leaderboards_menu":
+        bot.answer_callback_query(call.id)
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("🏆 Referral Leaderboard", callback_data="admin_leaderboard"),
+            InlineKeyboardButton("📸 Upload Leaderboard", callback_data="admin_uploader_leaderboard"),
+            InlineKeyboardButton("🔙 Back to Users", callback_data="panel_users")
+        )
+        bot.edit_message_text("🏆 *Select Leaderboard Type*", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        return
 
     elif data == "admin_leaderboard":
         bot.answer_callback_query(call.id, "Fetching leaderboard...")
