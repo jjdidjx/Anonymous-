@@ -12,6 +12,13 @@ import random
 from contextlib import contextmanager
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def escape_markdown(text):
+    if not text:
+        return ""
+    # Escaping for Markdown V1
+    return text.replace("_", "\\_").replace("*", "\\*").replace("[", "\\[").replace("`", "\\`")
+
  # make sure to have this file for cross-instance forwarding
 import psycopg2
 from psycopg2 import pool as pg_pool
@@ -4531,9 +4538,10 @@ def admin_callbacks(call):
                 uid, username, fname, lname, refs = row
                 
                 if username:
-                    display_name = f"@{username}"
+                    display_name = f"@{escape_markdown(username)}"
                 else:
-                    display_name = f"{fname or ''} {lname or ''}".strip() or f"User {uid}"
+                    full = f"{fname or ''} {lname or ''}".strip()
+                    display_name = escape_markdown(full) or f"User {uid}"
                     
                 lines.append(f"{i}. {display_name} - *{refs}* invites")
             text = "\n".join(lines)
@@ -4565,9 +4573,10 @@ def admin_callbacks(call):
                     uid, username, fname, lname, uploads = row
                     
                     if username:
-                        display_name = f"@{username}"
+                        display_name = f"@{escape_markdown(username)}"
                     else:
-                        display_name = f"{fname or ''} {lname or ''}".strip() or f"User {uid}"
+                        full = f"{fname or ''} {lname or ''}".strip()
+                        display_name = escape_markdown(full) or f"User {uid}"
                         
                     lines.append(f"{i}. {display_name} - *{uploads}* uploads")
                 text = "\n".join(lines)
