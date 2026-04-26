@@ -3442,60 +3442,42 @@ def stats_command(message):
     )
 @bot.message_handler(commands=['info'])
 def info_command(message):
-
+    if not is_admin(message.chat.id):
+        # For regular users, /info shows their own dashboard
+        menu_command(message)
+        return
     if not is_admin(message.chat.id):
         return
 
-    if not message.reply_to_message:
-        bot.send_message(message.chat.id, "Reply to a relayed message.")
+    target_id = None
+    parts = message.text.split()
+    
+    # 1. Check if ID or Query provided in arguments
+    if len(parts) > 1:
+        query = parts[1].strip()
+        if query.isdigit():
+            target_id = int(query)
+        else:
+            # If it's a name/username, use the search logic
+            perform_admin_search(message, query)
+            return
+
+    # 2. Check if used as a reply
+    elif message.reply_to_message:
+        bot_msg_id = message.reply_to_message.message_id
+        target_id = get_original_sender(bot_msg_id, message.chat.id)
+
+    if not target_id:
+        bot.send_message(message.chat.id, "❌ *Usage:* \nReply to a message with `/info` \nOR \nType `/info USER_ID` or `/info USERNAME`", parse_mode="Markdown")
         return
 
-    bot_msg_id = message.reply_to_message.message_id
-    user_id = get_original_sender(bot_msg_id, message.chat.id)
-
-    if not user_id:
-        bot.send_message(message.chat.id, "User not found.")
+    # Check if user exists
+    if not user_exists(target_id):
+        bot.send_message(message.chat.id, f"❌ User `{target_id}` not found in database.", parse_mode="Markdown")
         return
 
-    with get_connection() as conn:
-        with conn.cursor() as c:
-            c.execute("""
-                SELECT username,
-                       banned,
-                       auto_banned,
-                       whitelisted,
-                       activation_media_count,
-                       total_media_sent,
-                       last_activation_time
-                FROM users
-                WHERE user_id=%s
-            """, (user_id,))
-            row = c.fetchone()
-
-    if not row:
-        bot.send_message(message.chat.id, "User not found.")
-        return
-
-    username, banned, auto_banned, whitelisted, act_count, total_media, last_time = row
-    warnings, last_reason = get_warning_details(user_id)
-
-    bot.send_message(
-        message.chat.id,
-        f"""
-👤 USER INFO
-
-🆔 ID: {user_id}
-🏷 Username: {username}
-📸 Activation Media: {act_count}
-📦 Total Media Sent: {total_media}
-⚠️ Warnings: {warnings}/{MAX_WARNINGS}
-📝 Last Reason: {last_reason}
-
-🚫 Manual Ban: {banned}
-⏳ Auto Ban: {auto_banned}
-⭐ Whitelisted: {whitelisted}
-        """
-    )
+    # Trigger the interactive profile panel
+    send_admin_user_profile(message.chat.id, target_id)
 
 @bot.message_handler(commands=['warn'])
 def warn_command(message):
@@ -5006,7 +4988,7 @@ def add_referral_bonus(referrer_id):
                 WHERE user_id=%s
             """, (now, get_inactivity_limit(), referrer_id))
 
-@bot.message_handler(commands=['menu'])
+@bot.message_handler(commands=['menu', 'me', 'dashboard'])
 def menu_command(message):
     user_id = message.chat.id
     if is_banned(user_id):
@@ -5032,20 +5014,25 @@ def menu_command(message):
     minutes = (time_left % 3600) // 60
     
     import datetime
-    join_date_str = datetime.datetime.fromtimestamp(joined_at).strftime('%Y-%m-%d %H:%M') if joined_at else "N/A"
-    display_name = f"@{db_username}" if db_username else (message.from_user.username or message.from_user.first_name)
+    join_date_str = datetime.datetime.fromtimestamp(joined_at).strftime('%d %b %Y') if joined_at else "N/A"
+    display_name = f"@{db_username}" if db_username else (message.from_user.username or message.from_user.first_name or "User")
 
-    bot.send_message(
-        user_id,
-        f"📊 *Your Dashboard*\n\n"
-        f"👤 *User:* {display_name}\n"
-        f"📅 *Joined:* {join_date_str}\n"
-        f"📸 *Media Shared:* {total_media_sent}\n"
-        f"👥 *Users Invited:* {invites}\n"
-        f"⏳ *Activity Time Left:* {hours}h {minutes}m\n\n"
-        f"Use /referral to get your invite link and earn more time (1 invite = +1 hour)!",
-        parse_mode="Markdown"
+    text = (
+        f"🌟 *USER DASHBOARD* 🌟\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 *Account:* `{escape_markdown(display_name)}`\n"
+        f"📅 *Joined:* `{join_date_str}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 *YOUR ACTIVITY*\n"
+        f"📸 *Media Shared:* `{total_media_sent}`\n"
+        f"👥 *Total Referrals:* `{invites}`\n"
+        f"⏳ *Active Time Left:* `{hours}h {minutes}m`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 *Tip:* Use /referral to get your link!\n"
+        f"_(1 Invite = +1 Hour of active time)_"
     )
+    
+    bot.send_message(user_id, text, parse_mode="Markdown")
 
 # =========================
 # 🚀 MAIN BOOT
