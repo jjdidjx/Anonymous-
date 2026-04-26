@@ -4723,34 +4723,7 @@ def admin_callbacks(call):
         uid = int(parts[1])
         page = parts[2] if len(parts) > 2 else "0"
         filter_type = parts[3] if len(parts) > 3 else "all"
-            f"_{escape_markdown(notes or 'No administrative notes recorded.')}_"
-        )
-        
-        markup = InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            InlineKeyboardButton("📂 View Files", callback_data=f"admin_view_files:{uid}"),
-            InlineKeyboardButton("✉️ Message", callback_data=f"admin_msg_user:{uid}")
-        )
-        markup.add(
-            InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{uid}"),
-            InlineKeyboardButton("📝 Edit Note", callback_data=f"admin_start_note:{uid}")
-        )
-        
-        if tg_username and tg_username != "None":
-            markup.add(InlineKeyboardButton("🌐 Profile Link", url=f"t.me/{tg_username}"))
-        elif bot_username and bot_username != "None" and bot_username != "admin":
-            # Fallback to bot username if they happened to use their real one there
-            markup.add(InlineKeyboardButton("🌐 Bot Name Link", url=f"t.me/{bot_username}"))
-
-        markup.add(
-            InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{uid}"),
-            InlineKeyboardButton("🔙 Back to List", callback_data=f"admin_userlist:{page}:{filter_type}")
-        )
-        
-        try:
-            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-        except Exception:
-            pass
+        display_admin_user_profile(call.message, uid, back_callback=f"admin_userlist:{page}:{filter_type}")
         return
 
     elif data.startswith("admin_unban_user:"):
