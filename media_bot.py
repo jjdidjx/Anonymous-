@@ -3427,20 +3427,27 @@ def stats_command(message):
     bot.send_message(
         message.chat.id,
         f"""
-📊 *SYSTEM INSIGHTS*
-╔══════════════════════╗
-   👥 Total Users: `{total}`
-╚══════════════════════╝
+📊 *EXECUTIVE SUMMARY*
+━━━━━━━━━━━━━━━━━━━━
+👥 *Total Network Size*
+↳ `{total}` registered members
 
-🟢 *Active:* `{active}`  |  ⏳ *Expired:* `{inactive}`
-🚫 *Banned:* `{banned}`  |  🌟 *VIP:* `{whitelisted}`
+✅ *Verified Active:* `{active}`
+⌛ *Inactive/Expired:* `{inactive}`
+🚫 *Banned/Blocked:* `{banned}`
 
-┌──────────────────────┐
-   📂 *Media Logged:* `{map_count}`
-   ♻️ *Duplicates:* `{duplicate_total}`
-└──────────────────────┘
+⚠️ *Pending Setup:* `{pending_setup}`
+(No name set)
+📸 *Pending Joining:* `{pending_activation}`
+(No media sent)
 
-🚪 *Gateway:* `{join_status}`
+📂 *Media Repository*
+• Files Tracked: `{map_count}`
+• Duplicates Blocked: `{duplicate_total}`
+
+🌟 *VIP Members:* `{whitelisted}`
+🚪 *Gateway Status:* `{join_status}`
+━━━━━━━━━━━━━━━━━━━━
         """,
         parse_mode="Markdown"
     )
