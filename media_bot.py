@@ -3332,11 +3332,11 @@ def stats_command(message):
 
     active_cutoff = int(time.time()) - get_inactivity_limit()
     with get_connection() as conn:
-        with conn.cursor() as c:
-
+            # 1. Total
             c.execute("SELECT COUNT(*) FROM users")
             total = c.fetchone()[0]
 
+            # 2. Active (Verified, within window)
             c.execute("""
                 SELECT COUNT(*) FROM users u
                 LEFT JOIN admins a ON u.user_id = a.user_id
@@ -3353,6 +3353,7 @@ def stats_command(message):
             """, (active_cutoff,))
             active = c.fetchone()[0]
 
+            # 3. Inactive (Verified, outside window)
             c.execute("""
                 SELECT COUNT(*) FROM users u
                 LEFT JOIN admins a ON u.user_id = a.user_id
@@ -3365,6 +3366,15 @@ def stats_command(message):
             """, (active_cutoff,))
             inactive = c.fetchone()[0]
 
+            # 4. Pending Setup (Started bot, no name yet)
+            c.execute("SELECT COUNT(*) FROM users WHERE username IS NULL AND banned=FALSE")
+            pending_setup = c.fetchone()[0]
+
+            # 5. Pending Activation (Set name, but never sent media)
+            c.execute("SELECT COUNT(*) FROM users WHERE username IS NOT NULL AND last_activation_time IS NULL AND banned=FALSE")
+            pending_activation = c.fetchone()[0]
+
+            # 6. Banned
             c.execute("SELECT COUNT(*) FROM users WHERE banned=TRUE")
             banned = c.fetchone()[0]
 
@@ -3375,8 +3385,6 @@ def stats_command(message):
             map_count = c.fetchone()[0]
             c.execute("SELECT COALESCE(SUM(duplicate_count), 0) FROM media_duplicates")
             duplicate_total = c.fetchone()[0]
-            c.execute("SELECT COUNT(*) FROM users WHERE total_media_sent = 0")
-            zero_media_users = c.fetchone()[0]
     join_status = "OPEN" if is_join_open() else "CLOSED"
 
     bot.send_message(
@@ -3384,16 +3392,22 @@ def stats_command(message):
         f"""
 💎 *BOT STATISTICS* 💎
 
-👥 *Total Users:* {total}
-🟢 *Active Users:* {active}
-⏳ *Inactive:* {inactive}
-⏰ *Activity Window:* {get_inactivity_limit() // 3600}h
-🚫 *Banned:* {banned}
-🌟 *VIP / Whitelist:* {whitelisted}
-🆕 *0-Media Users:* {zero_media_users}
-♻️ *Duplicates Prevented:* {duplicate_total}
-📂 *Mapped Messages:* {map_count}
-🚪 *Join Status:* {join_status}
+👥 *Total Users:* `{total}`
+
+✅ *Active Users:* `{active}`
+⏳ *Inactive Users:* `{inactive}`
+🚫 *Banned Users:* `{banned}`
+
+⚠️ *Pending Setup:* `{pending_setup}`
+(Started bot, but didn't set a name)
+
+📸 *Pending Joining:* `{pending_activation}`
+(Set name, but didn't send media yet)
+
+🌟 *VIP / Whitelisted:* `{whitelisted}`
+♻️ *Duplicates Filtered:* `{duplicate_total}`
+📂 *Tracked Files:* `{map_count}`
+🚪 *New Joins:* `{join_status}`
         """,
         parse_mode="Markdown"
     )
@@ -4672,16 +4686,23 @@ def admin_callbacks(call):
         
         with get_connection() as conn:
             with conn.cursor() as c:
+                # Use subquery with ROW_NUMBER to get unique original messages
                 c.execute("""
-                    SELECT receiver_id, bot_message_id 
-                    FROM message_map 
-                    WHERE original_user_id=%s 
-                    ORDER BY created_at DESC 
+                    SELECT receiver_id, bot_message_id
+                    FROM (
+                        SELECT receiver_id, bot_message_id, created_at,
+                               ROW_NUMBER() OVER(PARTITION BY original_message_id ORDER BY created_at DESC) as rn
+                        FROM message_map
+                        WHERE original_user_id = %s
+                    ) t
+                    WHERE rn = 1
+                    ORDER BY created_at DESC
                     LIMIT 15 OFFSET %s
                 """, (uid, offset))
                 files = c.fetchall()
                 
-                c.execute("SELECT COUNT(*) FROM message_map WHERE original_user_id=%s", (uid,))
+                # Correct count of unique media sent by this user
+                c.execute("SELECT COUNT(DISTINCT original_message_id) FROM message_map WHERE original_user_id=%s", (uid,))
                 total_files = c.fetchone()[0]
                 
         if not files and offset == 0:
