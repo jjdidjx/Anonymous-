@@ -3428,82 +3428,128 @@ def stats_command(message):
         message.chat.id,
         f"""
 💎 *BOT STATISTICS* 💎
-
+━━━━━━━━━━━━━━━━━━━━
 👥 *Total Users:* `{total}`
 
 ✅ *Active Users:* `{active}`
 ⏳ *Inactive Users:* `{inactive}`
 🚫 *Banned Users:* `{banned}`
-
+━━━━━━━━━━━━━━━━━━━━
 ⚠️ *Pending Setup:* `{pending_setup}`
-(Started bot, but didn't set a name)
 
 📸 *Pending Joining:* `{pending_activation}`
-(Set name, but didn't send media yet)
-
-🌟 *VIP / Whitelisted:* `{whitelisted}`
-♻️ *Duplicates Filtered:* `{duplicate_total}`
-📂 *Tracked Files:* `{map_count}`
-🚪 *New Joins:* `{join_status}`
+━━━━━━━━━━━━━━━━━━━━
+🌟 *VIP:* `{whitelisted}` ♻️ *Duplicates:* `{duplicate_total}`
+📂 *Files:* `{map_count}` 🚪 *Join:* `{join_status}`
+━━━━━━━━━━━━━━━━━━━━
         """,
         parse_mode="Markdown"
     )
+# @bot.message_handler(commands=['info'])
+# def info_command(message):
+
 @bot.message_handler(commands=['info'])
 def info_command(message):
-
     if not is_admin(message.chat.id):
         return
 
     if not message.reply_to_message:
-        bot.send_message(message.chat.id, "Reply to a relayed message.")
+        bot.send_message(message.chat.id, "❌ *Error:* Reply to a relayed message to get user info.", parse_mode="Markdown")
         return
 
     bot_msg_id = message.reply_to_message.message_id
     user_id = get_original_sender(bot_msg_id, message.chat.id)
 
     if not user_id:
-        bot.send_message(message.chat.id, "User not found.")
+        bot.send_message(message.chat.id, "❌ *Error:* User not found in database.", parse_mode="Markdown")
         return
 
+    # Trigger the premium profile logic via callback-style invocation
+    data = f"admin_user_info:{user_id}:0:all"
+    
+    # Simple object to mimic a callback object
+    class FakeCall:
+        def __init__(self, msg, data):
+            self.message = msg
+            self.data = data
+            self.from_user = msg.from_user
+            self.id = "0"
+            
+    fake_call = FakeCall(message, data)
+    
+    # We call admin_callbacks but we need to ensure it doesn't try to bot.answer_callback_query("0")
+    # Actually, we can just call the specific handler if we can find it, but calling admin_callbacks is fine
+    # because it will just ignore the answer_callback_query error or handle it.
+    
+    # Alternative: Just perform a send_message with the profile text directly.
+    # Let's just do it directly to be safe and clean.
+    
     with get_connection() as conn:
         with conn.cursor() as c:
             c.execute("""
-                SELECT username,
-                       banned,
-                       auto_banned,
-                       whitelisted,
-                       activation_media_count,
-                       total_media_sent,
-                       last_activation_time
-                FROM users
-                WHERE user_id=%s
+                SELECT u.username, u.joined_at, u.last_activation_time, u.total_media_sent, COUNT(r.user_id),
+                       u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
+                FROM users u
+                LEFT JOIN users r ON r.referred_by = u.user_id
+                WHERE u.user_id = %s
+                GROUP BY u.user_id, u.username, u.joined_at, u.last_activation_time, u.total_media_sent, u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
             """, (user_id,))
             row = c.fetchone()
-
+            
     if not row:
-        bot.send_message(message.chat.id, "User not found.")
+        bot.send_message(message.chat.id, "❌ User not found.")
         return
-
-    username, banned, auto_banned, whitelisted, act_count, total_media, last_time = row
-    warnings, last_reason = get_warning_details(user_id)
-
-    bot.send_message(
-        message.chat.id,
-        f"""
-👤 USER INFO
-
-🆔 ID: {user_id}
-🏷 Username: {username}
-📸 Activation Media: {act_count}
-📦 Total Media Sent: {total_media}
-⚠️ Warnings: {warnings}/{MAX_WARNINGS}
-📝 Last Reason: {last_reason}
-
-🚫 Manual Ban: {banned}
-⏳ Auto Ban: {auto_banned}
-⭐ Whitelisted: {whitelisted}
-        """
+        
+    bot_username, joined_at, last_active, media, refs, first_name, last_name, notes, reputation, tg_username = row
+    now = int(time.time())
+    import datetime
+    joined_str = datetime.datetime.fromtimestamp(joined_at).strftime('%d %b %Y') if joined_at else "Unknown"
+    
+    status_str = "🔴 Inactive"
+    if last_active:
+        time_passed = now - last_active
+        time_left = max(0, get_inactivity_limit() - time_passed)
+        if time_left > 0:
+            status_str = f"🟢 {time_left // 3600}h {(time_left % 3600) // 60}m"
+        
+    rep_emoji = {"Trusted": "👑", "Neutral": "👤", "Suspicious": "⚠️", "Scammer": "🚫"}.get(reputation, "👤")
+    full_name = f"{first_name or ''} {last_name or ''}".strip() or "Anonymous"
+    display_tg_user = f"@{tg_username}" if tg_username else "No Username"
+    
+    text = (
+        f"👤 *USER PROFILE*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔸 *Telegram Name:* `{escape_markdown(full_name)}`\n"
+        f"🔸 *Username:* `{escape_markdown(display_tg_user)}`\n"
+        f"🔸 *Bot ID Name:* `{escape_markdown(bot_username or 'Not Set')}`\n"
+        f"🔸 *User ID:* `{user_id}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 *STATISTICS*\n"
+        f"📸 *Total Uploads:* `{media}`\n"
+        f"👥 *Total Referrals:* `{refs}`\n"
+        f"⏱ *Current Status:* {status_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏷 *Reputation:* {rep_emoji} *{reputation}*\n"
+        f"📅 *Join Date:* `{joined_str}`\n\n"
+        f"📝 *ADMIN NOTES:*\n"
+        f"_{escape_markdown(notes or 'No administrative notes recorded.')}_"
     )
+    
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("📂 View Files", callback_data=f"admin_view_files:{user_id}"),
+        InlineKeyboardButton("✉️ Message", callback_data=f"admin_msg_user:{user_id}")
+    )
+    markup.add(
+        InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{user_id}"),
+        InlineKeyboardButton("📝 Edit Note", callback_data=f"admin_start_note:{user_id}")
+    )
+    markup.add(
+        InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{user_id}"),
+        InlineKeyboardButton("🔙 Close", callback_data="delete_message")
+    )
+    
+    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
 
 @bot.message_handler(commands=['warn'])
 def warn_command(message):
@@ -4154,6 +4200,15 @@ def noop_callback(call):
     bot.answer_callback_query(call.id)
 
 
+@bot.callback_query_handler(func=lambda call: call.data == "delete_message")
+def delete_msg_callback(call):
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        bot.answer_callback_query(call.id, "Message already deleted or too old.")
+    bot.answer_callback_query(call.id)
+
+
 @bot.callback_query_handler(func=lambda call: call.data in {
     "panel_back", "panel_stats", "panel_users", "panel_firewall", "panel_system", "panel_moderation", "panel_vip", "panel_broadcast"
 })
@@ -4175,6 +4230,11 @@ def panel_navigation_callbacks(call):
             _panel_main_markup(),
             message_id=call.message.message_id,
         )
+        return
+
+    if call.data == "panel_stats":
+        bot.answer_callback_query(call.id)
+        stats_command(call.message)
         return
 
     if call.data == "panel_users":
