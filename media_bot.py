@@ -3474,27 +3474,20 @@ def stats_command(message):
     bot.send_message(
         message.chat.id,
         f"""
-📊 *EXECUTIVE SUMMARY*
-━━━━━━━━━━━━━━━━━━━━
-👥 *Total Network Size*
-↳ `{total}` registered members
+📊 **BOT STATISTICS**
 
-✅ *Verified Active:* `{active}`
-⌛ *Inactive/Expired:* `{inactive}`
-🚫 *Banned/Blocked:* `{banned}`
+👥 **Total Users:** `{total}`
 
-⚠️ *Pending Setup:* `{pending_setup}`
-(No name set)
-📸 *Pending Joining:* `{pending_activation}`
-(No media sent)
+✅ **Active:** `{active}`
+⏳ **Inactive:** `{inactive}`
+🚫 **Banned:** `{banned}`
+🌟 **VIP:** `{whitelisted}`
 
-📂 *Media Repository*
-• Files Tracked: `{map_count}`
-• Duplicates Blocked: `{duplicate_total}`
+📂 **Mapfile:** `{map_count}`
+♻️ **Duplicates:** `{duplicate_total}`
+⚠️ **Pending:** `{pending_setup + pending_activation}`
 
-🌟 *VIP Members:* `{whitelisted}`
-🚪 *Gateway Status:* `{join_status}`
-━━━━━━━━━━━━━━━━━━━━
+🚪 **Join Status:** `{join_status}`
         """,
         parse_mode="Markdown"
     )
