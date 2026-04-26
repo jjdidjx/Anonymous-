@@ -3427,26 +3427,23 @@ def stats_command(message):
     bot.send_message(
         message.chat.id,
         f"""
-💎 *BOT STATISTICS* 💎
-━━━━━━━━━━━━━━━━━━━━
-👥 *Total Users:* `{total}`
+📊 *SYSTEM INSIGHTS*
+╔══════════════════════╗
+   👥 Total Users: `{total}`
+╚══════════════════════╝
 
-✅ *Active Users:* `{active}`
-⏳ *Inactive Users:* `{inactive}`
-🚫 *Banned Users:* `{banned}`
-━━━━━━━━━━━━━━━━━━━━
-⚠️ *Pending Setup:* `{pending_setup}`
+🟢 *Active:* `{active}`  |  ⏳ *Expired:* `{inactive}`
+🚫 *Banned:* `{banned}`  |  🌟 *VIP:* `{whitelisted}`
 
-📸 *Pending Joining:* `{pending_activation}`
-━━━━━━━━━━━━━━━━━━━━
-🌟 *VIP:* `{whitelisted}` ♻️ *Duplicates:* `{duplicate_total}`
-📂 *Files:* `{map_count}` 🚪 *Join:* `{join_status}`
-━━━━━━━━━━━━━━━━━━━━
+┌──────────────────────┐
+   📂 *Media Logged:* `{map_count}`
+   ♻️ *Duplicates:* `{duplicate_total}`
+└──────────────────────┘
+
+🚪 *Gateway:* `{join_status}`
         """,
         parse_mode="Markdown"
     )
-# @bot.message_handler(commands=['info'])
-# def info_command(message):
 
 @bot.message_handler(commands=['info'])
 def info_command(message):
@@ -3517,22 +3514,21 @@ def info_command(message):
     display_tg_user = f"@{tg_username}" if tg_username else "No Username"
     
     text = (
-        f"👤 *USER PROFILE*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔸 *Telegram Name:* `{escape_markdown(full_name)}`\n"
-        f"🔸 *Username:* `{escape_markdown(display_tg_user)}`\n"
-        f"🔸 *Bot ID Name:* `{escape_markdown(bot_username or 'Not Set')}`\n"
-        f"🔸 *User ID:* `{user_id}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 *STATISTICS*\n"
-        f"📸 *Total Uploads:* `{media}`\n"
-        f"👥 *Total Referrals:* `{refs}`\n"
-        f"⏱ *Current Status:* {status_str}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🏷 *Reputation:* {rep_emoji} *{reputation}*\n"
-        f"📅 *Join Date:* `{joined_str}`\n\n"
-        f"📝 *ADMIN NOTES:*\n"
-        f"_{escape_markdown(notes or 'No administrative notes recorded.')}_"
+        f"💳 *USER ID CARD*\n"
+        f"────────────────────\n"
+        f"👤 *Identity:* `{escape_markdown(full_name)}`\n"
+        f"🌐 *Alias:* `{escape_markdown(display_tg_user)}`\n"
+        f"🤖 *Bot ID:* `{escape_markdown(bot_username or 'None')}`\n"
+        f"🆔 *Serial:* `{user_id}`\n"
+        f"────────────────────\n"
+        f"📊 *DATA LOGS*\n"
+        f"📸 Uploads: `{media}` | 👥 Refs: `{refs}`\n"
+        f"⏱ Window: {status_str}\n"
+        f"────────────────────\n"
+        f"🏷 *Rep:* {rep_emoji} *{reputation}*\n"
+        f"📅 *Born:* `{joined_str}`\n\n"
+        f"📝 *NOTES:*\n"
+        f"_{escape_markdown(notes or 'No data recorded.')}_"
     )
     
     markup = InlineKeyboardMarkup(row_width=2)
@@ -4220,9 +4216,12 @@ def panel_navigation_callbacks(call):
     if call.data == "panel_back":
         bot.answer_callback_query(call.id)
         panel_text = (
-            "🛠 *ADMIN DASHBOARD*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "Welcome to the central control unit. Select a module below to manage your bot."
+            "🎛 *CORE CONTROL CENTER*\n"
+            "Select a system module to manage:\n\n"
+            "┠ 👥 *User Management*\n"
+            "┠ 🛡️ *Firewall Controls*\n"
+            "┠ ⚙️ *System Config*\n"
+            "┠ 📊 *Bot Statistics*"
         )
         _panel_send_or_edit(
             call.message.chat.id,
@@ -4247,12 +4246,12 @@ def panel_navigation_callbacks(call):
                 invited_users = c.fetchone()[0]
 
         panel_text = (
-            "👥 *USER MANAGEMENT*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📈 *Total Users:* `{total_users}`\n"
-            f"✉️ *Invited Users:* `{invited_users}`\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "Manage your community, monitor growth, or identify top contributors."
+            "👥 *USER DIRECTORY*\n"
+            "────────────────────\n"
+            f"📈 Total Population: `{total_users}`\n"
+            f"✉️ Referral Network: `{invited_users}`\n"
+            "────────────────────\n"
+            "Search, filter, and moderate users."
         )
         
         _panel_send_or_edit(
@@ -4266,16 +4265,16 @@ def panel_navigation_callbacks(call):
     if call.data == "panel_firewall":
         bot.answer_callback_query(call.id)
         enabled = is_force_join_enabled()
-        status = "🟢 ENABLED" if enabled else "🔴 DISABLED"
+        status = "🛡️ SECURED" if enabled else "🔓 BYPASSED"
         channels = get_force_join_channels()
         
         panel_text = (
-            "🧱 *FIREWALL CONTROL*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔸 *Status:* {status}\n"
-            f"🔸 *Active Channels:* `{len(channels)}`\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "Configure force-join requirements to grow your channels."
+            "🧱 *SECURITY GATEWAY*\n"
+            "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n"
+            f"🔸 Gate Status: {status}\n"
+            f"🔸 Watchlist: `{len(channels)}` channels\n"
+            "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n"
+            "Enforce join-requirements for access."
         )
         
         _panel_send_or_edit(
@@ -4289,9 +4288,12 @@ def panel_navigation_callbacks(call):
     if call.data == "panel_system":
         bot.answer_callback_query(call.id)
         panel_text = (
-            "⚙️ *SYSTEM SETTINGS*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "Manage core database functions, exports, and bot maintenance."
+            "💻 *TERMINAL CONFIG*\n"
+            "⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼\n"
+            "> Database: `CONNECTED`\n"
+            "> Backup: `READY`\n"
+            "⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼\n"
+            "Maintain core bot infrastructure."
         )
         _panel_send_or_edit(
             call.message.chat.id,
@@ -4305,8 +4307,9 @@ def panel_navigation_callbacks(call):
         bot.answer_callback_query(call.id)
         panel_text = (
             "🚫 *MODERATION CENTER*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "Access banning tools, message filters, and bot automated responses."
+            "✕━━━━━━━━━━━━━━━━━━✕\n"
+            "Banning | Warnings | Filters\n"
+            "✕━━━━━━━━━━━━━━━━━━✕"
         )
         _panel_send_or_edit(
             call.message.chat.id,
@@ -4319,9 +4322,9 @@ def panel_navigation_callbacks(call):
     if call.data == "panel_vip":
         bot.answer_callback_query(call.id)
         panel_text = (
-            "💎 *VIP MANAGEMENT*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "Add or remove users from the premium whitelist to bypass restrictions."
+            "💎 *VIP PRIVILEGES*\n"
+            "✨━━━━━━━━━━━━━━━━━━✨\n"
+            "Manage users who bypass filters."
         )
         _panel_send_or_edit(
             call.message.chat.id,
@@ -4334,7 +4337,7 @@ def panel_navigation_callbacks(call):
     if call.data == "panel_broadcast":
         pending_admin_broadcast.add(call.from_user.id)
         bot.answer_callback_query(call.id, "Awaiting broadcast text")
-        bot.send_message(call.from_user.id, "📣 *Send broadcast text.* \n\nType /cancel to stop.", parse_mode="Markdown")
+        bot.send_message(call.from_user.id, "📣 *GLOBAL BROADCAST*\n\nType message below or /cancel.", parse_mode="Markdown")
         return
 
 
