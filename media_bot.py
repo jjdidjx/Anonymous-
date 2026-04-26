@@ -2519,9 +2519,7 @@ def handle_admin_search_user(message):
     perform_admin_search(message, query)
 
 
-def perform_admin_search(message, query):
-    bot.send_message(message.chat.id, f"🔎 Searching for `{query}`...", parse_mode="Markdown")
-    
+def perform_admin_search(message, query, silent_single=False):
     with get_connection() as conn:
         with conn.cursor() as c:
             clean_query = query.replace('@', '').lower()
@@ -2548,6 +2546,13 @@ def perform_admin_search(message, query):
         bot.send_message(message.chat.id, f"❌ No users found matching `{query}`.", parse_mode="Markdown")
         return
         
+    # If only 1 result and silent_single is True, show info directly
+    if len(rows) == 1 and silent_single:
+        show_admin_user_info(message.chat.id, rows[0][0])
+        return
+
+    bot.send_message(message.chat.id, f"🔎 Found {len(rows)} results for `{query}`:", parse_mode="Markdown")
+    
     import time
     now = int(time.time())
     markup = InlineKeyboardMarkup(row_width=1)
@@ -2574,8 +2579,8 @@ def perform_admin_search(message, query):
         
         markup.add(InlineKeyboardButton(btn_text, callback_data=f"admin_user_info:{uid}:0:all"))
         
-    markup.add(InlineKeyboardButton("🔙 Back to Panel", callback_data="panel_users"))
-    bot.send_message(message.chat.id, f"✅ Found {len(rows)} results for `{query}`:", parse_mode="Markdown", reply_markup=markup)
+    markup.add(InlineKeyboardButton("🔙 Close", callback_data="delete_message"))
+    bot.send_message(message.chat.id, "Select a user to view profile:", reply_markup=markup)
 
 
 @bot.message_handler(
@@ -3457,84 +3462,37 @@ def info_command(message):
     if not is_admin(message.chat.id):
         return
 
-    parts = message.text.split(maxsplit=1)
-    query = parts[1].strip() if len(parts) > 1 else None
-    
-    # CASE 1: Reply to a message
-    if not query and message.reply_to_message:
+    # 1. Check for Reply
+    if message.reply_to_message:
         bot_msg_id = message.reply_to_message.message_id
         user_id = get_original_sender(bot_msg_id, message.chat.id)
-        if not user_id:
-            bot.send_message(message.chat.id, "❌ *Error:* User not found for this message.", parse_mode="Markdown")
+        if user_id:
+            show_admin_user_info(message.chat.id, user_id)
             return
-        # Show specific profile
-        display_admin_user_profile(message, user_id)
+        else:
+            bot.send_message(message.chat.id, "❌ *Error:* Could not trace the original sender of this message.", parse_mode="Markdown")
+            return
+
+    # 2. Check for Arguments
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.send_message(message.chat.id, "ℹ️ *Usage:*\n• Reply to a message with `/info`\n• `/info [UserID]`\n• `/info [@username]`\n• `/info [Name]`", parse_mode="Markdown")
         return
 
-    # CASE 2: No arguments and no reply
-    if not query:
-        bot.send_message(message.chat.id, "🔍 *Info Command*\n\nUsage:\n• Reply to a user's message with `/info`.\n• Type `/info [UserID]`\n• Type `/info [@username]`\n• Type `/info [Name]`", parse_mode="Markdown")
-        return
-
-    # CASE 3: Search by query (ID, Username, Name)
-    bot.send_message(message.chat.id, f"🔎 Searching for `{query}`...", parse_mode="Markdown")
+    query = parts[1].strip()
     
-    with get_connection() as conn:
-        with conn.cursor() as c:
-            clean_query = query.replace('@', '').lower()
-            
-            # Search logic
-            sql = """
-                SELECT u.user_id, u.username, u.tg_username, u.first_name, u.last_name, 
-                       u.total_media_sent, COUNT(r.user_id), u.last_activation_time
-                FROM users u
-                LEFT JOIN users r ON r.referred_by = u.user_id
-                WHERE u.user_id::text = %s
-                   OR LOWER(u.username) = %s
-                   OR LOWER(u.tg_username) = %s
-                   OR LOWER(u.first_name) LIKE %s
-                   OR LOWER(u.last_name) LIKE %s
-                GROUP BY u.user_id, u.username, u.tg_username, u.first_name, u.last_name, u.total_media_sent, u.last_activation_time
-            """
-            pattern = f"%{clean_query}%"
-            c.execute(sql, (clean_query, clean_query, clean_query, pattern, pattern))
-            rows = c.fetchall()
-            
-    if not rows:
-        bot.send_message(message.chat.id, f"❌ No users found matching `{query}`.", parse_mode="Markdown")
-        return
+    # If it's a numeric ID, try direct lookup first
+    if query.isdigit():
+        uid = int(query)
+        if user_exists(uid):
+            show_admin_user_info(message.chat.id, uid)
+            return
 
-    if len(rows) == 1:
-        # Exactly one user found - show their profile directly
-        display_admin_user_profile(message, rows[0][0])
-    else:
-        # Multiple users found - show a list of buttons
-        now = int(time.time())
-        markup = InlineKeyboardMarkup(row_width=1)
-        
-        for row in rows:
-            uid, bot_name, tg_user, f_name, l_name, media, refs, last_active = row
-            
-            if last_active:
-                status = "🟢" if (now - last_active) < get_inactivity_limit() else "⏳"
-            else:
-                status = "🔴"
-                
-            name_parts = []
-            if f_name: name_parts.append(f_name)
-            if tg_user: name_parts.append(f"(@{tg_user})")
-            if bot_name: name_parts.append(f"[{bot_name}]")
-            
-            display_name = " ".join(name_parts) or f"User {uid}"
-            btn_text = f"{status} {display_name[:30]} | 📸 {media}"
-            markup.add(InlineKeyboardButton(btn_text, callback_data=f"admin_user_info:{uid}:0:all"))
-            
-        markup.add(InlineKeyboardButton("🔙 Close", callback_data="delete_message"))
-        bot.send_message(message.chat.id, f"👥 Found {len(rows)} matching users:", parse_mode="Markdown", reply_markup=markup)
+    # Otherwise, perform flexible search
+    perform_admin_search(message, query, silent_single=True)
 
 
-def display_admin_user_profile(message, user_id, back_callback="delete_message"):
-    """Internal helper to render the premium profile UI."""
+def show_admin_user_info(chat_id, user_id, message_id=None, page="0", filter_type="all"):
     with get_connection() as conn:
         with conn.cursor() as c:
             c.execute("""
@@ -3548,8 +3506,7 @@ def display_admin_user_profile(message, user_id, back_callback="delete_message")
             row = c.fetchone()
             
     if not row:
-        if hasattr(message, 'message_id'):
-            bot.send_message(message.chat.id, "❌ User not found.")
+        bot.send_message(chat_id, "❌ User not found.")
         return
         
     bot_username, joined_at, last_active, media, refs, first_name, last_name, notes, reputation, tg_username, banned = row
@@ -3596,20 +3553,20 @@ def display_admin_user_profile(message, user_id, back_callback="delete_message")
         InlineKeyboardButton("📝 Edit Note", callback_data=f"admin_start_note:{user_id}")
     )
     
-    # Toggle Ban/Unban button
     if banned:
         markup.add(InlineKeyboardButton("🔓 Unban User", callback_data=f"admin_unban_user:{user_id}"))
     else:
         markup.add(InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{user_id}"))
         
-    # Determine back label
-    back_label = "🔙 Back" if back_callback != "delete_message" else "🔙 Close"
-    markup.add(InlineKeyboardButton(back_label, callback_data=back_callback))
+    markup.add(InlineKeyboardButton("🔙 Close", callback_data="delete_message"))
     
-    try:
-        bot.edit_message_text(text, message.chat.id, message.message_id, parse_mode="Markdown", reply_markup=markup)
-    except Exception:
-        bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
+    if message_id:
+        try:
+            bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=markup)
+        except Exception:
+            bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
+    else:
+        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
 
 @bot.message_handler(commands=['warn'])
 def warn_command(message):
@@ -4723,15 +4680,8 @@ def admin_callbacks(call):
         uid = int(parts[1])
         page = parts[2] if len(parts) > 2 else "0"
         filter_type = parts[3] if len(parts) > 3 else "all"
-        display_admin_user_profile(call.message, uid, back_callback=f"admin_userlist:{page}:{filter_type}")
-        return
-
-    elif data.startswith("admin_unban_user:"):
-        uid = int(data.split(":")[1])
-        unban_user(uid)
-        bot.answer_callback_query(call.id, "✅ User unbanned.")
-        # Refresh the profile view
-        display_admin_user_profile(call.message, uid)
+        
+        show_admin_user_info(call.message.chat.id, uid, message_id=call.message.message_id, page=page, filter_type=filter_type)
         return
 
     elif data == "admin_search_user":
@@ -4744,6 +4694,16 @@ def admin_callbacks(call):
         uid = int(data.split(":")[1])
         ban_user(uid)
         bot.answer_callback_query(call.id, "🚫 User Banned!", show_alert=True)
+        # Refresh UI
+        show_admin_user_info(call.message.chat.id, uid, message_id=call.message.message_id)
+        return
+
+    elif data.startswith("admin_unban_user:"):
+        uid = int(data.split(":")[1])
+        unban_user(uid)
+        bot.answer_callback_query(call.id, "🔓 User Unbanned!", show_alert=True)
+        # Refresh UI
+        show_admin_user_info(call.message.chat.id, uid, message_id=call.message.message_id)
         return
 
     elif data.startswith("admin_show_reps:"):
