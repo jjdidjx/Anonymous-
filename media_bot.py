@@ -106,6 +106,7 @@ pending_vip_add = set()
 pending_vip_remove = set()
 pending_fw_msg = set()
 pending_admin_broadcast = set()
+pending_admin_broadcast_target = {} # admin_id -> "active"|"inactive"|"pending"|"activation"|"all"
 pending_admin_setcaption = set()
 pending_admin_setwelcome = set()
 pending_admin_setinactive = set()
@@ -2653,15 +2654,61 @@ def handle_admin_pending_inputs(message):
 
     if message.chat.id in pending_admin_broadcast:
         if text.lower() == "/cancel":
-            bot.send_message(message.chat.id, "Broadcast cancelled.")
+            bot.send_message(message.chat.id, "❌ Broadcast cancelled.")
             pending_admin_broadcast.discard(message.chat.id)
+            pending_admin_broadcast_target.pop(message.chat.id, None)
             return
-        if not text:
-            bot.send_message(message.chat.id, "Broadcast text cannot be empty.")
-            return
-        sent = admin_broadcast_text(message.chat.id, text)
-        bot.send_message(message.chat.id, f"📣 Broadcast sent to {sent} targets.")
+        
+        target = pending_admin_broadcast_target.pop(message.chat.id, "all")
         pending_admin_broadcast.discard(message.chat.id)
+        
+        bot.send_message(message.chat.id, f"🚀 Starting targeted broadcast to: *{target.upper()}*...", parse_mode="Markdown")
+        
+        active_cutoff = int(time.time()) - get_inactivity_limit()
+        
+        # Determine targets based on selection
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                if target == "active":
+                    sql = """
+                        SELECT u.user_id FROM users u
+                        LEFT JOIN admins a ON u.user_id = a.user_id
+                        WHERE u.banned=FALSE AND u.username IS NOT NULL
+                        AND (a.user_id IS NOT NULL OR u.whitelisted=TRUE OR (u.last_activation_time IS NOT NULL AND u.last_activation_time >= %s))
+                    """
+                    c.execute(sql, (active_cutoff,))
+                elif target == "inactive":
+                    sql = """
+                        SELECT u.user_id FROM users u
+                        LEFT JOIN admins a ON u.user_id = a.user_id
+                        WHERE u.banned=FALSE AND u.username IS NOT NULL
+                        AND a.user_id IS NULL AND u.whitelisted=FALSE
+                        AND u.last_activation_time IS NOT NULL AND u.last_activation_time < %s
+                    """
+                    c.execute(sql, (active_cutoff,))
+                elif target == "pending":
+                    c.execute("SELECT user_id FROM users WHERE username IS NULL AND banned=FALSE")
+                elif target == "activation":
+                    c.execute("SELECT user_id FROM users WHERE username IS NOT NULL AND last_activation_time IS NULL AND banned=FALSE")
+                else: # all
+                    c.execute("SELECT user_id FROM users WHERE banned=FALSE")
+                
+                uids = [row[0] for row in c.fetchall()]
+        
+        if not uids:
+            bot.send_message(message.chat.id, "❌ No users found in this category.")
+            return
+
+        payload = f"📢 {text}"
+        sent_count = 0
+        workers = max(1, min(SEND_MAX_WORKERS, len(uids)))
+        
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_uid = {executor.submit(_send_text_with_retry, uid, payload): uid for uid in uids}
+            for future in as_completed(future_to_uid):
+                if future.result(): sent_count += 1
+                
+        bot.send_message(message.chat.id, f"✅ Broadcast complete. Sent to {sent_count}/{len(uids)} users.")
         return
 
     if message.chat.id in pending_admin_setcaption:
@@ -4342,22 +4389,75 @@ def panel_navigation_callbacks(call):
         return
 
     if call.data == "panel_broadcast":
-        pending_admin_broadcast.add(call.from_user.id)
-        bot.answer_callback_query(call.id, "Awaiting broadcast text")
-        bot.send_message(call.from_user.id, "📣 *GLOBAL BROADCAST*\n\nType message below or /cancel.", parse_mode="Markdown")
+        bot.answer_callback_query(call.id)
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("✅ Active", callback_data="bc_target:active"),
+            InlineKeyboardButton("⏳ Inactive", callback_data="bc_target:inactive")
+        )
+        markup.add(
+            InlineKeyboardButton("⚠️ Pending Setup", callback_data="bc_target:pending"),
+            InlineKeyboardButton("📸 Pending Media", callback_data="bc_target:activation")
+        )
+        markup.add(InlineKeyboardButton("🌎 All Users", callback_data="bc_target:all"))
+        markup.add(InlineKeyboardButton("🔙 Back", callback_data="panel_back"))
+        
+        bot.edit_message_text(
+            "📣 *TARGETED BROADCAST*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Select the group of users you want to message:",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
         return
 
 
 @bot.callback_query_handler(func=lambda call: call.data in {
     "fw_on", "fw_off", "fw_add", "fw_remove", "vip_add", "vip_remove", "fw_status", "fw_edit_msg"
-} or call.data.startswith("fw_view:") or call.data.startswith("fw_del:"))
-def firewall_ui_callbacks(call):
+} or call.data.startswith("fw_view:") or call.data.startswith("fw_del:") or call.data.startswith("bc_target:") or call.data.startswith("admin_unban_user:"))
+def admin_extra_callbacks(call):
     actor_id = call.from_user.id
     admin_chat_id = call.message.chat.id
     if not is_admin(actor_id):
         bot.answer_callback_query(call.id, "Not admin.")
         return
 
+    data = call.data
+
+    if data.startswith("bc_target:"):
+        target = data.split(":")[1]
+        pending_admin_broadcast.add(actor_id)
+        pending_admin_broadcast_target[actor_id] = target
+        bot.answer_callback_query(call.id, f"Target: {target}")
+        bot.edit_message_text(
+            f"📣 *BROADCAST TO {target.upper()}*\n\n"
+            "Please send the message you want to broadcast.\n"
+            "You can type /cancel to abort.",
+            admin_chat_id,
+            call.message.message_id,
+            parse_mode="Markdown"
+        )
+        return
+
+    if data.startswith("admin_unban_user:"):
+        uid = int(data.split(":")[1])
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute("UPDATE users SET banned=FALSE, auto_banned=FALSE WHERE user_id=%s", (uid,))
+        bot.answer_callback_query(call.id, "✅ User unbanned.")
+        # Refresh profile
+        call.data = f"admin_user_info:{uid}:0:all"
+        admin_callbacks(call)
+        return
+    
+    # Original firewall logic follows
+    firewall_ui_callbacks(call)
+
+def firewall_ui_callbacks(call):
+    actor_id = call.from_user.id
+    admin_chat_id = call.message.chat.id
     data = call.data
 
     if data.startswith("fw_view:"):
@@ -4671,11 +4771,11 @@ def admin_callbacks(call):
             with conn.cursor() as c:
                 c.execute("""
                     SELECT u.username, u.joined_at, u.last_activation_time, u.total_media_sent, COUNT(r.user_id),
-                           u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
+                           u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username, u.banned
                     FROM users u
                     LEFT JOIN users r ON r.referred_by = u.user_id
                     WHERE u.user_id = %s
-                    GROUP BY u.user_id, u.username, u.joined_at, u.last_activation_time, u.total_media_sent, u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
+                    GROUP BY u.user_id, u.username, u.joined_at, u.last_activation_time, u.total_media_sent, u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username, u.banned
                 """, (uid,))
                 row = c.fetchone()
         
@@ -4683,13 +4783,13 @@ def admin_callbacks(call):
             bot.answer_callback_query(call.id, "User not found.", show_alert=True)
             return
             
-        bot_username, joined_at, last_active, media, refs, first_name, last_name, notes, reputation, tg_username = row
+        bot_username, joined_at, last_active, media, refs, first_name, last_name, notes, reputation, tg_username, is_banned_user = row
         import datetime, time
         now = int(time.time())
         joined_str = datetime.datetime.fromtimestamp(joined_at).strftime('%d %b %Y') if joined_at else "Unknown"
         
-        status_str = "🔴 Inactive"
-        if last_active:
+        status_str = "🔴 BANNED" if is_banned_user else "🔴 Inactive"
+        if not is_banned_user and last_active:
             time_passed = now - last_active
             time_left = max(0, get_inactivity_limit() - time_passed)
             if time_left > 0:
@@ -4728,15 +4828,11 @@ def admin_callbacks(call):
             InlineKeyboardButton("📝 Edit Note", callback_data=f"admin_start_note:{uid}")
         )
         
-        if tg_username and tg_username != "None":
-            markup.add(InlineKeyboardButton("🌐 Profile Link", url=f"t.me/{tg_username}"))
-        elif bot_username and bot_username != "None" and bot_username != "admin":
-            # Fallback to bot username if they happened to use their real one there
-            markup.add(InlineKeyboardButton("🌐 Bot Name Link", url=f"t.me/{bot_username}"))
+        ban_btn = InlineKeyboardButton("✅ Unban User", callback_data=f"admin_unban_user:{uid}") if is_banned_user else InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{uid}")
 
         markup.add(
-            InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{uid}"),
-            InlineKeyboardButton("🔙 Back to List", callback_data=f"admin_userlist:{page}:{filter_type}")
+            ban_btn,
+            InlineKeyboardButton("🔙 Close", callback_data="delete_message")
         )
         
         try:
@@ -4755,6 +4851,9 @@ def admin_callbacks(call):
         uid = int(data.split(":")[1])
         ban_user(uid)
         bot.answer_callback_query(call.id, "🚫 User Banned!", show_alert=True)
+        # Refresh profile
+        call.data = f"admin_user_info:{uid}:0:all"
+        admin_callbacks(call)
         return
 
     elif data.startswith("admin_show_reps:"):
