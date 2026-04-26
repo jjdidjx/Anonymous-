@@ -2488,6 +2488,21 @@ def _process_album(messages):
     # external_forward.forward_album(bot, messages)
 
 
+@bot.message_handler(commands=['search'])
+def search_command(message):
+    if not is_admin(message.chat.id):
+        return
+        
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        pending_admin_search_user.add(message.from_user.id)
+        bot.send_message(message.chat.id, "🔍 *User Search*\n\nSend me any of the following to search:\n• User ID (e.g. `1234567`)\n• Telegram Username (@username)\n• Real Name (First or Last)\n• Bot Name (Custom name)\n\nType /cancel to abort.", parse_mode="Markdown")
+        return
+        
+    query = parts[1].strip()
+    perform_admin_search(message, query)
+
+
 @bot.message_handler(func=lambda m: m.from_user.id in pending_admin_search_user)
 def handle_admin_search_user(message):
     if not is_admin(message.chat.id):
@@ -2501,32 +2516,36 @@ def handle_admin_search_user(message):
         return
         
     pending_admin_search_user.discard(message.from_user.id)
-    bot.send_message(message.chat.id, "🔍 Searching...")
+    perform_admin_search(message, query)
+
+
+def perform_admin_search(message, query):
+    bot.send_message(message.chat.id, f"🔎 Searching for `{query}`...", parse_mode="Markdown")
     
     with get_connection() as conn:
         with conn.cursor() as c:
-            if query.isdigit():
-                c.execute("""
-                    SELECT u.user_id, u.username, u.total_media_sent, COUNT(r.user_id), u.last_activation_time
-                    FROM users u
-                    LEFT JOIN users r ON r.referred_by = u.user_id
-                    WHERE u.user_id = %s
-                    GROUP BY u.user_id
-                """, (int(query),))
-            else:
-                clean_query = query.replace('@', '')
-                c.execute("""
-                    SELECT u.user_id, u.username, u.total_media_sent, COUNT(r.user_id), u.last_activation_time
-                    FROM users u
-                    LEFT JOIN users r ON r.referred_by = u.user_id
-                    WHERE u.username ILIKE %s
-                    GROUP BY u.user_id
-                    LIMIT 20
-                """, (f"%{clean_query}%",))
+            clean_query = query.replace('@', '').lower()
+            
+            # Flexible search across all name/id fields
+            sql = """
+                SELECT u.user_id, u.username, u.tg_username, u.first_name, u.last_name, 
+                       u.total_media_sent, COUNT(r.user_id), u.last_activation_time
+                FROM users u
+                LEFT JOIN users r ON r.referred_by = u.user_id
+                WHERE u.user_id::text = %s
+                   OR LOWER(u.username) LIKE %s
+                   OR LOWER(u.tg_username) LIKE %s
+                   OR LOWER(u.first_name) LIKE %s
+                   OR LOWER(u.last_name) LIKE %s
+                GROUP BY u.user_id
+                LIMIT 15
+            """
+            pattern = f"%{clean_query}%"
+            c.execute(sql, (clean_query, pattern, pattern, pattern, pattern))
             rows = c.fetchall()
             
     if not rows:
-        bot.send_message(message.chat.id, "❌ No users found matching your query.")
+        bot.send_message(message.chat.id, f"❌ No users found matching `{query}`.", parse_mode="Markdown")
         return
         
     import time
@@ -2534,20 +2553,29 @@ def handle_admin_search_user(message):
     markup = InlineKeyboardMarkup(row_width=1)
     
     for row in rows:
-        uid, fallback, media, refs, last_active = row[0], row[1], row[2], row[3], row[4]
+        uid, bot_name, tg_user, f_name, l_name, media, refs, last_active = row
+        
+        # Determine status icon
         if last_active:
             time_passed = now - last_active
             time_left = max(0, get_inactivity_limit() - time_passed)
-            status = f"🟢 {time_left // 3600}h" if time_left > 0 else "🔴"
+            status = "🟢" if time_left > 0 else "⏳"
         else:
             status = "🔴"
             
-        display_name = f"@{fallback}" if fallback else f"ID:{uid}"
-        btn_text = f"{display_name} | {status} | 📸 {media}"
+        # Build display name for the button
+        name_parts = []
+        if f_name: name_parts.append(f_name)
+        if tg_user: name_parts.append(f"(@{tg_user})")
+        if bot_name: name_parts.append(f"[{bot_name}]")
+        
+        display_name = " ".join(name_parts) or f"User {uid}"
+        btn_text = f"{status} {display_name[:30]} | 📸 {media}"
+        
         markup.add(InlineKeyboardButton(btn_text, callback_data=f"admin_user_info:{uid}:0:all"))
         
     markup.add(InlineKeyboardButton("🔙 Back to Panel", callback_data="panel_users"))
-    bot.send_message(message.chat.id, f"🔍 Search Results for `{query}`:", parse_mode="Markdown", reply_markup=markup)
+    bot.send_message(message.chat.id, f"✅ Found {len(rows)} results for `{query}`:", parse_mode="Markdown", reply_markup=markup)
 
 
 @bot.message_handler(
@@ -3332,6 +3360,7 @@ def stats_command(message):
 
     active_cutoff = int(time.time()) - get_inactivity_limit()
     with get_connection() as conn:
+        with conn.cursor() as c:
             # 1. Total
             c.execute("SELECT COUNT(*) FROM users")
             total = c.fetchone()[0]
@@ -4558,23 +4587,27 @@ def admin_callbacks(call):
             if time_left > 0:
                 status_str = f"🟢 {time_left // 3600}h {(time_left % 3600) // 60}m"
             
-        rep_emoji = {"Trusted": "✅", "Neutral": "⚪", "Suspicious": "🟡", "Scammer": "🚫"}.get(reputation, "⚪")
-        full_name = f"{first_name or ''} {last_name or ''}".strip() or "N/A"
-        display_tg_user = f"@{tg_username}" if tg_username else "N/A"
+        rep_emoji = {"Trusted": "👑", "Neutral": "👤", "Suspicious": "⚠️", "Scammer": "🚫"}.get(reputation, "👤")
+        full_name = f"{first_name or ''} {last_name or ''}".strip() or "Anonymous"
+        display_tg_user = f"@{tg_username}" if tg_username else "No Username"
         
         text = (
-            f"💎 *USER PROFILE*\n\n"
-            f"👤 *Name:* {escape_markdown(full_name)}\n"
-            f"🌐 *Username:* {escape_markdown(display_tg_user)}\n"
-            f"🤖 *Bot Name:* {escape_markdown(bot_username or 'N/A')}\n"
-            f"🆔 *ID:* `{uid}`\n\n"
+            f"👤 *USER PROFILE*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔸 *Telegram Name:* `{escape_markdown(full_name)}`\n"
+            f"🔸 *Username:* `{escape_markdown(display_tg_user)}`\n"
+            f"🔸 *Bot ID Name:* `{escape_markdown(bot_username or 'Not Set')}`\n"
+            f"🔸 *User ID:* `{uid}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📊 *STATISTICS*\n"
-            f"📸 *Uploads:* `{media}`\n"
-            f"🎁 *Referrals:* `{refs}`\n"
-            f"⏱ *Status:* {status_str}\n\n"
-            f"🏷 *Reputation:* {rep_emoji} {reputation}\n"
-            f"📅 *Joined:* {joined_str}\n\n"
-            f"📝 *ADMIN NOTES:*\n{notes or '_No notes yet._'}"
+            f"📸 *Total Uploads:* `{media}`\n"
+            f"👥 *Total Referrals:* `{refs}`\n"
+            f"⏱ *Current Status:* {status_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏷 *Reputation:* {rep_emoji} *{reputation}*\n"
+            f"📅 *Join Date:* `{joined_str}`\n\n"
+            f"📝 *ADMIN NOTES:*\n"
+            f"_{escape_markdown(notes or 'No administrative notes recorded.')}_"
         )
         
         markup = InlineKeyboardMarkup(row_width=2)
