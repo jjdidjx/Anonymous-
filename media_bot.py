@@ -2234,7 +2234,10 @@ def broadcast_warning_notice(sender_id, target_id, warnings, reason):
     return sent_count
 
 
-def admin_broadcast_text(sender_id, text):
+def admin_broadcast_any(sender_id, message):
+    """
+    Broadcasts any message (text, photo, video, etc.) to all active users and relay groups.
+    """
     receivers = [uid for uid in get_receivers_cached() if uid != sender_id]
     if is_force_join_enabled():
         receivers = [
@@ -2243,23 +2246,25 @@ def admin_broadcast_text(sender_id, text):
         ]
     extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
+    
     if not targets:
         return 0
 
-    payload = f"📢 {text}"
     workers = max(1, min(SEND_MAX_WORKERS, len(targets)))
     sent_count = 0
+    
+    def send_task(uid):
+        try:
+            return bot.copy_message(uid, sender_id, message.message_id)
+        except Exception:
+            return None
+
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_uid = {
-            executor.submit(_send_text_with_retry, uid, payload): uid
-            for uid in targets
-        }
-        for future in as_completed(future_to_uid):
-            try:
-                if future.result():
-                    sent_count += 1
-            except Exception:
-                pass
+        futures = [executor.submit(send_task, uid) for uid in targets]
+        for future in as_completed(futures):
+            if future.result():
+                sent_count += 1
+                
     return sent_count
 # =========================
 # 🚀 BROADCAST WORKER
@@ -2604,6 +2609,17 @@ def handle_admin_pending_inputs(message):
         pending_admin_addforward.discard(message.chat.id)
         return
 
+    if message.chat.id in pending_admin_broadcast:
+        if message.content_type == 'text' and message.text.strip().lower() == "/cancel":
+            bot.send_message(message.chat.id, "❌ Broadcast cancelled.")
+            pending_admin_broadcast.discard(message.chat.id)
+            return
+            
+        sent = admin_broadcast_any(message.chat.id, message)
+        bot.send_message(message.chat.id, f"✅ Broadcast sent to `{sent}` targets.")
+        pending_admin_broadcast.discard(message.chat.id)
+        return
+
     if message.content_type != 'text':
         bot.send_message(message.chat.id, "⚠️ Please send text only for this input, or type /cancel to abort.")
         return
@@ -2656,18 +2672,6 @@ def handle_admin_pending_inputs(message):
         pending_fw_msg.discard(message.chat.id)
         return
 
-    if message.chat.id in pending_admin_broadcast:
-        if text.lower() == "/cancel":
-            bot.send_message(message.chat.id, "Broadcast cancelled.")
-            pending_admin_broadcast.discard(message.chat.id)
-            return
-        if not text:
-            bot.send_message(message.chat.id, "Broadcast text cannot be empty.")
-            return
-        sent = admin_broadcast_text(message.chat.id, text)
-        bot.send_message(message.chat.id, f"📣 Broadcast sent to {sent} targets.")
-        pending_admin_broadcast.discard(message.chat.id)
-        return
 
     if message.chat.id in pending_admin_setcaption:
         if text.lower() == "/cancel":
@@ -3423,8 +3427,12 @@ def stats_command(message):
             c.execute("SELECT COUNT(*) FROM users WHERE whitelisted=TRUE")
             whitelisted = c.fetchone()[0]
 
+            c.execute("SELECT COUNT(*) FROM forward_targets")
+            relay_groups = c.fetchone()[0]
+
             c.execute("SELECT COUNT(*) FROM message_map")
             map_count = c.fetchone()[0]
+            
             c.execute("SELECT COALESCE(SUM(duplicate_count), 0) FROM media_duplicates")
             duplicate_total = c.fetchone()[0]
     join_status = "OPEN" if is_join_open() else "CLOSED"
@@ -3434,24 +3442,23 @@ def stats_command(message):
         f"""
 📊 *EXECUTIVE SUMMARY*
 ━━━━━━━━━━━━━━━━━━━━
-👥 *Total Network Size*
-↳ `{total}` registered members
+👥 *Network Population*
+↳ Total: `{total}` members
+↳ Verified Active: `{active}` ✅
+↳ Inactive/Expired: `{inactive}` ⌛
+↳ Banned/Blocked: `{banned}` 🚫
 
-✅ *Verified Active:* `{active}`
-⌛ *Inactive/Expired:* `{inactive}`
-🚫 *Banned/Blocked:* `{banned}`
+⚠️ *Attention Required*
+↳ Pending Setup: `{pending_setup}` (No Name)
+↳ Pending Media: `{pending_activation}` (No Activity)
 
-⚠️ *Pending Setup:* `{pending_setup}`
-(No name set)
-📸 *Pending Joining:* `{pending_activation}`
-(No media sent)
+📂 *Media & Routing*
+↳ Files Tracked: `{map_count}` 📑
+↳ Relay Groups: `{relay_groups}` 🗺️
+↳ Duplicates Blocked: `{duplicate_total}` ♻️
 
-📂 *Media Repository*
-• Files Tracked: `{map_count}`
-• Duplicates Blocked: `{duplicate_total}`
-
-🌟 *VIP Members:* `{whitelisted}`
-🚪 *Gateway Status:* `{join_status}`
+🌟 *VIP Status:* `{whitelisted}`
+🚪 *Gateway:* `{join_status}`
 ━━━━━━━━━━━━━━━━━━━━
         """,
         parse_mode="Markdown"
