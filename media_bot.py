@@ -3110,22 +3110,25 @@ def _panel_main_markup():
 
 
 def _panel_firewall_markup():
-    status = "🟢 ON" if is_force_join_enabled() else "🔴 OFF"
+    enabled = is_force_join_enabled()
+    status = "🟢 ENABLED" if enabled else "🔴 DISABLED"
+    channels = get_force_join_channels()
+    channel_count = len(channels)
+    
     markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(InlineKeyboardButton(f"Status: {status}", callback_data="noop"))
     markup.add(
         InlineKeyboardButton("➕ Add Channel", callback_data="fw_add"),
         InlineKeyboardButton("➖ Remove Channel", callback_data="fw_remove"),
     )
     markup.add(
         InlineKeyboardButton("✏️ Edit Message", callback_data="fw_edit_msg"),
-        InlineKeyboardButton("📊 Channels", callback_data="fw_status"),
+        InlineKeyboardButton("📊 Manage Channels", callback_data="fw_status"),
     )
     markup.add(
         InlineKeyboardButton("🟢 Enable", callback_data="fw_on"),
         InlineKeyboardButton("🔴 Disable", callback_data="fw_off"),
     )
-    markup.add(InlineKeyboardButton("🔙 Back", callback_data="panel_back"))
+    markup.add(InlineKeyboardButton("🔙 Back to Main", callback_data="panel_back"))
     return markup
 
 
@@ -3250,9 +3253,14 @@ def set_inactive_message_cmd(message):
 def admin_panel(message):
     if not is_admin(message.chat.id):
         return
+    panel_text = (
+        "🛠 *ADMIN DASHBOARD*\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Welcome to the central control unit. Select a module below to manage your bot."
+    )
     _panel_send_or_edit(
         message.chat.id,
-        "🛠 *Admin Dashboard*",
+        panel_text,
         _panel_main_markup(),
     )
 @bot.message_handler(commands=['setwelcome'])
@@ -3442,42 +3450,60 @@ def stats_command(message):
     )
 @bot.message_handler(commands=['info'])
 def info_command(message):
-    if not is_admin(message.chat.id):
-        # For regular users, /info shows their own dashboard
-        menu_command(message)
-        return
+
     if not is_admin(message.chat.id):
         return
 
-    target_id = None
-    parts = message.text.split()
-    
-    # 1. Check if ID or Query provided in arguments
-    if len(parts) > 1:
-        query = parts[1].strip()
-        if query.isdigit():
-            target_id = int(query)
-        else:
-            # If it's a name/username, use the search logic
-            perform_admin_search(message, query)
-            return
-
-    # 2. Check if used as a reply
-    elif message.reply_to_message:
-        bot_msg_id = message.reply_to_message.message_id
-        target_id = get_original_sender(bot_msg_id, message.chat.id)
-
-    if not target_id:
-        bot.send_message(message.chat.id, "❌ *Usage:* \nReply to a message with `/info` \nOR \nType `/info USER_ID` or `/info USERNAME`", parse_mode="Markdown")
+    if not message.reply_to_message:
+        bot.send_message(message.chat.id, "Reply to a relayed message.")
         return
 
-    # Check if user exists
-    if not user_exists(target_id):
-        bot.send_message(message.chat.id, f"❌ User `{target_id}` not found in database.", parse_mode="Markdown")
+    bot_msg_id = message.reply_to_message.message_id
+    user_id = get_original_sender(bot_msg_id, message.chat.id)
+
+    if not user_id:
+        bot.send_message(message.chat.id, "User not found.")
         return
 
-    # Trigger the interactive profile panel
-    send_admin_user_profile(message.chat.id, target_id)
+    with get_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("""
+                SELECT username,
+                       banned,
+                       auto_banned,
+                       whitelisted,
+                       activation_media_count,
+                       total_media_sent,
+                       last_activation_time
+                FROM users
+                WHERE user_id=%s
+            """, (user_id,))
+            row = c.fetchone()
+
+    if not row:
+        bot.send_message(message.chat.id, "User not found.")
+        return
+
+    username, banned, auto_banned, whitelisted, act_count, total_media, last_time = row
+    warnings, last_reason = get_warning_details(user_id)
+
+    bot.send_message(
+        message.chat.id,
+        f"""
+👤 USER INFO
+
+🆔 ID: {user_id}
+🏷 Username: {username}
+📸 Activation Media: {act_count}
+📦 Total Media Sent: {total_media}
+⚠️ Warnings: {warnings}/{MAX_WARNINGS}
+📝 Last Reason: {last_reason}
+
+🚫 Manual Ban: {banned}
+⏳ Auto Ban: {auto_banned}
+⭐ Whitelisted: {whitelisted}
+        """
+    )
 
 @bot.message_handler(commands=['warn'])
 def warn_command(message):
@@ -4138,17 +4164,17 @@ def panel_navigation_callbacks(call):
 
     if call.data == "panel_back":
         bot.answer_callback_query(call.id)
+        panel_text = (
+            "🛠 *ADMIN DASHBOARD*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Welcome to the central control unit. Select a module below to manage your bot."
+        )
         _panel_send_or_edit(
             call.message.chat.id,
-            "🛠 *Admin Dashboard*",
+            panel_text,
             _panel_main_markup(),
             message_id=call.message.message_id,
         )
-        return
-
-    if call.data == "panel_stats":
-        bot.answer_callback_query(call.id)
-        stats_command(call.message)
         return
 
     if call.data == "panel_users":
@@ -4161,10 +4187,12 @@ def panel_navigation_callbacks(call):
                 invited_users = c.fetchone()[0]
 
         panel_text = (
-            "👥 *Users Panel*\n\n"
+            "👥 *USER MANAGEMENT*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
             f"📈 *Total Users:* `{total_users}`\n"
-            f"✉️ *Invited Users:* `{invited_users}`\n\n"
-            "Manage all users, view activity, or check the leaderboard."
+            f"✉️ *Invited Users:* `{invited_users}`\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Manage your community, monitor growth, or identify top contributors."
         )
         
         _panel_send_or_edit(
@@ -4177,9 +4205,22 @@ def panel_navigation_callbacks(call):
 
     if call.data == "panel_firewall":
         bot.answer_callback_query(call.id)
+        enabled = is_force_join_enabled()
+        status = "🟢 ENABLED" if enabled else "🔴 DISABLED"
+        channels = get_force_join_channels()
+        
+        panel_text = (
+            "🧱 *FIREWALL CONTROL*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔸 *Status:* {status}\n"
+            f"🔸 *Active Channels:* `{len(channels)}`\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Configure force-join requirements to grow your channels."
+        )
+        
         _panel_send_or_edit(
             call.message.chat.id,
-            "🧱 *Firewall Control Panel*",
+            panel_text,
             _panel_firewall_markup(),
             message_id=call.message.message_id,
         )
@@ -4187,9 +4228,14 @@ def panel_navigation_callbacks(call):
 
     if call.data == "panel_system":
         bot.answer_callback_query(call.id)
+        panel_text = (
+            "⚙️ *SYSTEM SETTINGS*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Manage core database functions, exports, and bot maintenance."
+        )
         _panel_send_or_edit(
             call.message.chat.id,
-            "⚙ *System Settings*",
+            panel_text,
             _panel_system_markup(),
             message_id=call.message.message_id,
         )
@@ -4197,9 +4243,14 @@ def panel_navigation_callbacks(call):
 
     if call.data == "panel_moderation":
         bot.answer_callback_query(call.id)
+        panel_text = (
+            "🚫 *MODERATION CENTER*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Access banning tools, message filters, and bot automated responses."
+        )
         _panel_send_or_edit(
             call.message.chat.id,
-            "🚫 *Moderation Panel*",
+            panel_text,
             _panel_moderation_markup(),
             message_id=call.message.message_id,
         )
@@ -4207,9 +4258,14 @@ def panel_navigation_callbacks(call):
 
     if call.data == "panel_vip":
         bot.answer_callback_query(call.id)
+        panel_text = (
+            "💎 *VIP MANAGEMENT*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Add or remove users from the premium whitelist to bypass restrictions."
+        )
         _panel_send_or_edit(
             call.message.chat.id,
-            "💎 *VIP Management*",
+            panel_text,
             _panel_vip_markup(),
             message_id=call.message.message_id,
         )
@@ -4218,7 +4274,7 @@ def panel_navigation_callbacks(call):
     if call.data == "panel_broadcast":
         pending_admin_broadcast.add(call.from_user.id)
         bot.answer_callback_query(call.id, "Awaiting broadcast text")
-        bot.send_message(call.from_user.id, "📣 Send broadcast text. Type /cancel to stop.")
+        bot.send_message(call.from_user.id, "📣 *Send broadcast text.* \n\nType /cancel to stop.", parse_mode="Markdown")
         return
 
 
@@ -4988,7 +5044,7 @@ def add_referral_bonus(referrer_id):
                 WHERE user_id=%s
             """, (now, get_inactivity_limit(), referrer_id))
 
-@bot.message_handler(commands=['menu', 'me', 'dashboard'])
+@bot.message_handler(commands=['menu'])
 def menu_command(message):
     user_id = message.chat.id
     if is_banned(user_id):
@@ -5014,25 +5070,24 @@ def menu_command(message):
     minutes = (time_left % 3600) // 60
     
     import datetime
-    join_date_str = datetime.datetime.fromtimestamp(joined_at).strftime('%d %b %Y') if joined_at else "N/A"
-    display_name = f"@{db_username}" if db_username else (message.from_user.username or message.from_user.first_name or "User")
+    join_date_str = datetime.datetime.fromtimestamp(joined_at).strftime('%Y-%m-%d %H:%M') if joined_at else "N/A"
+    display_name = f"@{db_username}" if db_username else (message.from_user.username or message.from_user.first_name)
 
-    text = (
-        f"🌟 *USER DASHBOARD* 🌟\n"
+    bot.send_message(
+        user_id,
+        f"📊 *YOUR DASHBOARD*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 *Account:* `{escape_markdown(display_name)}`\n"
-        f"📅 *Joined:* `{join_date_str}`\n"
+        f"👤 *User:* `{escape_markdown(display_name)}`\n"
+        f"🆔 *ID:* `{user_id}`\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 *YOUR ACTIVITY*\n"
         f"📸 *Media Shared:* `{total_media_sent}`\n"
-        f"👥 *Total Referrals:* `{invites}`\n"
-        f"⏳ *Active Time Left:* `{hours}h {minutes}m`\n"
+        f"👥 *Users Invited:* `{invites}`\n"
+        f"⏳ *Activity Time:* `{hours}h {minutes}m`\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Tip:* Use /referral to get your link!\n"
-        f"_(1 Invite = +1 Hour of active time)_"
+        f"📅 *Join Date:* `{join_date_str}`\n\n"
+        f"🎁 Use /referral to get your invite link and earn more time (1 invite = +1 hour)!",
+        parse_mode="Markdown"
     )
-    
-    bot.send_message(user_id, text, parse_mode="Markdown")
 
 # =========================
 # 🚀 MAIN BOOT
