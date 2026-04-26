@@ -3457,54 +3457,102 @@ def info_command(message):
     if not is_admin(message.chat.id):
         return
 
-    if not message.reply_to_message:
-        bot.send_message(message.chat.id, "❌ *Error:* Reply to a relayed message to get user info.", parse_mode="Markdown")
-        return
-
-    bot_msg_id = message.reply_to_message.message_id
-    user_id = get_original_sender(bot_msg_id, message.chat.id)
-
-    if not user_id:
-        bot.send_message(message.chat.id, "❌ *Error:* User not found in database.", parse_mode="Markdown")
-        return
-
-    # Trigger the premium profile logic via callback-style invocation
-    data = f"admin_user_info:{user_id}:0:all"
+    parts = message.text.split(maxsplit=1)
+    query = parts[1].strip() if len(parts) > 1 else None
     
-    # Simple object to mimic a callback object
-    class FakeCall:
-        def __init__(self, msg, data):
-            self.message = msg
-            self.data = data
-            self.from_user = msg.from_user
-            self.id = "0"
+    # CASE 1: Reply to a message
+    if not query and message.reply_to_message:
+        bot_msg_id = message.reply_to_message.message_id
+        user_id = get_original_sender(bot_msg_id, message.chat.id)
+        if not user_id:
+            bot.send_message(message.chat.id, "❌ *Error:* User not found for this message.", parse_mode="Markdown")
+            return
+        # Show specific profile
+        display_admin_user_profile(message, user_id)
+        return
+
+    # CASE 2: No arguments and no reply
+    if not query:
+        bot.send_message(message.chat.id, "🔍 *Info Command*\n\nUsage:\n• Reply to a user's message with `/info`.\n• Type `/info [UserID]`\n• Type `/info [@username]`\n• Type `/info [Name]`", parse_mode="Markdown")
+        return
+
+    # CASE 3: Search by query (ID, Username, Name)
+    bot.send_message(message.chat.id, f"🔎 Searching for `{query}`...", parse_mode="Markdown")
+    
+    with get_connection() as conn:
+        with conn.cursor() as c:
+            clean_query = query.replace('@', '').lower()
             
-    fake_call = FakeCall(message, data)
-    
-    # We call admin_callbacks but we need to ensure it doesn't try to bot.answer_callback_query("0")
-    # Actually, we can just call the specific handler if we can find it, but calling admin_callbacks is fine
-    # because it will just ignore the answer_callback_query error or handle it.
-    
-    # Alternative: Just perform a send_message with the profile text directly.
-    # Let's just do it directly to be safe and clean.
-    
+            # Search logic
+            sql = """
+                SELECT u.user_id, u.username, u.tg_username, u.first_name, u.last_name, 
+                       u.total_media_sent, COUNT(r.user_id), u.last_activation_time
+                FROM users u
+                LEFT JOIN users r ON r.referred_by = u.user_id
+                WHERE u.user_id::text = %s
+                   OR LOWER(u.username) = %s
+                   OR LOWER(u.tg_username) = %s
+                   OR LOWER(u.first_name) LIKE %s
+                   OR LOWER(u.last_name) LIKE %s
+                GROUP BY u.user_id, u.username, u.tg_username, u.first_name, u.last_name, u.total_media_sent, u.last_activation_time
+            """
+            pattern = f"%{clean_query}%"
+            c.execute(sql, (clean_query, clean_query, clean_query, pattern, pattern))
+            rows = c.fetchall()
+            
+    if not rows:
+        bot.send_message(message.chat.id, f"❌ No users found matching `{query}`.", parse_mode="Markdown")
+        return
+
+    if len(rows) == 1:
+        # Exactly one user found - show their profile directly
+        display_admin_user_profile(message, rows[0][0])
+    else:
+        # Multiple users found - show a list of buttons
+        now = int(time.time())
+        markup = InlineKeyboardMarkup(row_width=1)
+        
+        for row in rows:
+            uid, bot_name, tg_user, f_name, l_name, media, refs, last_active = row
+            
+            if last_active:
+                status = "🟢" if (now - last_active) < get_inactivity_limit() else "⏳"
+            else:
+                status = "🔴"
+                
+            name_parts = []
+            if f_name: name_parts.append(f_name)
+            if tg_user: name_parts.append(f"(@{tg_user})")
+            if bot_name: name_parts.append(f"[{bot_name}]")
+            
+            display_name = " ".join(name_parts) or f"User {uid}"
+            btn_text = f"{status} {display_name[:30]} | 📸 {media}"
+            markup.add(InlineKeyboardButton(btn_text, callback_data=f"admin_user_info:{uid}:0:all"))
+            
+        markup.add(InlineKeyboardButton("🔙 Close", callback_data="delete_message"))
+        bot.send_message(message.chat.id, f"👥 Found {len(rows)} matching users:", parse_mode="Markdown", reply_markup=markup)
+
+
+def display_admin_user_profile(message, user_id, back_callback="delete_message"):
+    """Internal helper to render the premium profile UI."""
     with get_connection() as conn:
         with conn.cursor() as c:
             c.execute("""
                 SELECT u.username, u.joined_at, u.last_activation_time, u.total_media_sent, COUNT(r.user_id),
-                       u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
+                       u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username, u.banned
                 FROM users u
                 LEFT JOIN users r ON r.referred_by = u.user_id
                 WHERE u.user_id = %s
-                GROUP BY u.user_id, u.username, u.joined_at, u.last_activation_time, u.total_media_sent, u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
+                GROUP BY u.user_id, u.username, u.joined_at, u.last_activation_time, u.total_media_sent, u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username, u.banned
             """, (user_id,))
             row = c.fetchone()
             
     if not row:
-        bot.send_message(message.chat.id, "❌ User not found.")
+        if hasattr(message, 'message_id'):
+            bot.send_message(message.chat.id, "❌ User not found.")
         return
         
-    bot_username, joined_at, last_active, media, refs, first_name, last_name, notes, reputation, tg_username = row
+    bot_username, joined_at, last_active, media, refs, first_name, last_name, notes, reputation, tg_username, banned = row
     now = int(time.time())
     import datetime
     joined_str = datetime.datetime.fromtimestamp(joined_at).strftime('%d %b %Y') if joined_at else "Unknown"
@@ -3547,12 +3595,21 @@ def info_command(message):
         InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{user_id}"),
         InlineKeyboardButton("📝 Edit Note", callback_data=f"admin_start_note:{user_id}")
     )
-    markup.add(
-        InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{user_id}"),
-        InlineKeyboardButton("🔙 Close", callback_data="delete_message")
-    )
     
-    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
+    # Toggle Ban/Unban button
+    if banned:
+        markup.add(InlineKeyboardButton("🔓 Unban User", callback_data=f"admin_unban_user:{user_id}"))
+    else:
+        markup.add(InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{user_id}"))
+        
+    # Determine back label
+    back_label = "🔙 Back" if back_callback != "delete_message" else "🔙 Close"
+    markup.add(InlineKeyboardButton(back_label, callback_data=back_callback))
+    
+    try:
+        bot.edit_message_text(text, message.chat.id, message.message_id, parse_mode="Markdown", reply_markup=markup)
+    except Exception:
+        bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
 
 @bot.message_handler(commands=['warn'])
 def warn_command(message):
@@ -4666,55 +4723,6 @@ def admin_callbacks(call):
         uid = int(parts[1])
         page = parts[2] if len(parts) > 2 else "0"
         filter_type = parts[3] if len(parts) > 3 else "all"
-        
-        with get_connection() as conn:
-            with conn.cursor() as c:
-                c.execute("""
-                    SELECT u.username, u.joined_at, u.last_activation_time, u.total_media_sent, COUNT(r.user_id),
-                           u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
-                    FROM users u
-                    LEFT JOIN users r ON r.referred_by = u.user_id
-                    WHERE u.user_id = %s
-                    GROUP BY u.user_id, u.username, u.joined_at, u.last_activation_time, u.total_media_sent, u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
-                """, (uid,))
-                row = c.fetchone()
-        
-        if not row:
-            bot.answer_callback_query(call.id, "User not found.", show_alert=True)
-            return
-            
-        bot_username, joined_at, last_active, media, refs, first_name, last_name, notes, reputation, tg_username = row
-        import datetime, time
-        now = int(time.time())
-        joined_str = datetime.datetime.fromtimestamp(joined_at).strftime('%d %b %Y') if joined_at else "Unknown"
-        
-        status_str = "🔴 Inactive"
-        if last_active:
-            time_passed = now - last_active
-            time_left = max(0, get_inactivity_limit() - time_passed)
-            if time_left > 0:
-                status_str = f"🟢 {time_left // 3600}h {(time_left % 3600) // 60}m"
-            
-        rep_emoji = {"Trusted": "👑", "Neutral": "👤", "Suspicious": "⚠️", "Scammer": "🚫"}.get(reputation, "👤")
-        full_name = f"{first_name or ''} {last_name or ''}".strip() or "Anonymous"
-        display_tg_user = f"@{tg_username}" if tg_username else "No Username"
-        
-        text = (
-            f"👤 *USER PROFILE*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔸 *Telegram Name:* `{escape_markdown(full_name)}`\n"
-            f"🔸 *Username:* `{escape_markdown(display_tg_user)}`\n"
-            f"🔸 *Bot ID Name:* `{escape_markdown(bot_username or 'Not Set')}`\n"
-            f"🔸 *User ID:* `{uid}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 *STATISTICS*\n"
-            f"📸 *Total Uploads:* `{media}`\n"
-            f"👥 *Total Referrals:* `{refs}`\n"
-            f"⏱ *Current Status:* {status_str}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🏷 *Reputation:* {rep_emoji} *{reputation}*\n"
-            f"📅 *Join Date:* `{joined_str}`\n\n"
-            f"📝 *ADMIN NOTES:*\n"
             f"_{escape_markdown(notes or 'No administrative notes recorded.')}_"
         )
         
@@ -4743,6 +4751,14 @@ def admin_callbacks(call):
             bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
         except Exception:
             pass
+        return
+
+    elif data.startswith("admin_unban_user:"):
+        uid = int(data.split(":")[1])
+        unban_user(uid)
+        bot.answer_callback_query(call.id, "✅ User unbanned.")
+        # Refresh the profile view
+        display_admin_user_profile(call.message, uid)
         return
 
     elif data == "admin_search_user":
