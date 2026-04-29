@@ -2485,20 +2485,35 @@ def _process_album(messages):
             return rows
 
         # For normal users, send as anonymous relay (copy)
+        attempts = max(0, SEND_RETRIES) + 1
         for chunk in chunks:
             chunk_media = [item[0] for item in chunk]
-            try:
-                sent_msgs = bot.send_media_group(user_id, chunk_media)
-                if store_mapping and sent_msgs:
-                    for sent, original_message_id in zip(sent_msgs, [item[1] for item in chunk]):
-                        rows.append((sent.message_id, sender_id, original_message_id, user_id, now))
-            except Exception as e:
-                print("Album send_media_group error:", e)
-            if FORWARD_DELAY > 0:
-                time.sleep(FORWARD_DELAY)
+            for i in range(attempts):
+                try:
+                    sent_msgs = bot.send_media_group(user_id, chunk_media)
+                    if store_mapping and sent_msgs:
+                        for sent, original_message_id in zip(sent_msgs, [item[1] for item in chunk]):
+                            rows.append((sent.message_id, sender_id, original_message_id, user_id, now))
+                    if FORWARD_DELAY > 0:
+                        time.sleep(FORWARD_DELAY)
+                    # Proactively pace album sends to prevent massive 429 timeouts.
+                    # Each media item = 1 message. Telegram limit is 30 msgs/sec.
+                    time.sleep(len(chunk_media) * 0.05)
+                    break
+                except Exception as e:
+                    print("Album send_media_group error:", e)
+                    wait = _retry_after_seconds(e)
+                    if i < attempts - 1:
+                        if wait is not None:
+                            time.sleep(max(0.05, wait))
+                        else:
+                            time.sleep(0.15 * (i + 1))
+                        continue
+                    break
         return rows
 
-    workers = max(1, min(SEND_MAX_WORKERS, len(targets)))
+    # Albums are extremely heavy on rate limits. Cap workers to prevent instant 429 errors.
+    workers = max(1, min(2, len(targets)))
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(send_album_to_user, user_id) for user_id in targets]
         for future in as_completed(futures):
