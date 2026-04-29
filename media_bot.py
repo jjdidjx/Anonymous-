@@ -2310,9 +2310,13 @@ def _process_single(message):
     sender_id = message.chat.id
     receivers = [uid for uid in get_receivers_cached() if uid != sender_id]
     if is_force_join_enabled():
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute("SELECT user_id, currently_joined FROM firewall_tracking WHERE user_id = ANY(%s)", (receivers,))
+                tracking_data = dict(c.fetchall())
         receivers = [
             uid for uid in receivers
-            if is_admin(uid) or is_vip(uid) or is_user_joined(uid)
+            if is_admin(uid) or is_vip(uid) or tracking_data.get(uid, True)
         ]
     extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
@@ -2409,9 +2413,13 @@ def _process_album(messages):
     sender_id = messages[0].chat.id
     receivers = [uid for uid in get_receivers_cached() if uid != sender_id]
     if is_force_join_enabled():
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute("SELECT user_id, currently_joined FROM firewall_tracking WHERE user_id = ANY(%s)", (receivers,))
+                tracking_data = dict(c.fetchall())
         receivers = [
             uid for uid in receivers
-            if is_admin(uid) or is_vip(uid) or is_user_joined(uid)
+            if is_admin(uid) or is_vip(uid) or tracking_data.get(uid, True)
         ]
     extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
