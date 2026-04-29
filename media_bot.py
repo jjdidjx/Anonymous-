@@ -187,6 +187,15 @@ def init_db():
                 )
             """)
             c.execute("CREATE INDEX IF NOT EXISTS idx_users_total_media ON users(total_media_sent DESC)")
+
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS firewall_tracking (
+                    user_id BIGINT PRIMARY KEY,
+                    msg_received BOOLEAN DEFAULT FALSE,
+                    passed_ever BOOLEAN DEFAULT FALSE,
+                    currently_joined BOOLEAN DEFAULT FALSE
+                )
+            """)
             c.execute("""
                 ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS referred_by BIGINT
@@ -1392,6 +1401,14 @@ def send_force_join_ui(user_id, prefix_text=None):
     )
     with last_fw_msg_lock:
         last_fw_msg[int(user_id)] = sent.message_id
+
+    with get_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("""
+                INSERT INTO firewall_tracking (user_id, msg_received)
+                VALUES (%s, TRUE)
+                ON CONFLICT (user_id) DO UPDATE SET msg_received = TRUE
+            """, (user_id,))
 
 
 def clear_force_join_ui(user_id):
@@ -3172,6 +3189,9 @@ def _panel_firewall_markup():
         InlineKeyboardButton("📊 Manage Channels", callback_data="fw_status"),
     )
     markup.add(
+        InlineKeyboardButton("📈 Statistics", callback_data="fw_stats")
+    )
+    markup.add(
         InlineKeyboardButton("🟢 Enable", callback_data="fw_on"),
         InlineKeyboardButton("🔴 Disable", callback_data="fw_off"),
     )
@@ -4212,6 +4232,49 @@ def check_join_callback(call):
         bot.answer_callback_query(call.id, "❌ You still need to join some channels.", show_alert=True)
         send_force_join_ui(user_id, prefix_text=prefix)
 
+@bot.chat_member_handler()
+def handle_chat_member_update(message):
+    new_status = message.new_chat_member.status
+    user_id = message.from_user.id
+    chat_id = str(message.chat.id)
+    
+    # Check if this chat is part of the firewall
+    channels = get_force_join_channels()
+    if not any(str(ch.get("chat_id")).strip() == chat_id for ch in channels):
+        return
+
+    # Check status using force_refresh to bypass cache
+    joined, _ = is_user_joined_detailed(user_id, force_refresh=True)
+
+    with get_connection() as conn:
+        with conn.cursor() as c:
+            if joined:
+                c.execute("SELECT passed_ever FROM firewall_tracking WHERE user_id=%s", (user_id,))
+                row = c.fetchone()
+                
+                c.execute("""
+                    INSERT INTO firewall_tracking (user_id, passed_ever, currently_joined)
+                    VALUES (%s, TRUE, TRUE)
+                    ON CONFLICT (user_id) DO UPDATE SET 
+                        passed_ever = TRUE, 
+                        currently_joined = TRUE
+                """, (user_id,))
+                
+                if not row or not row[0]:
+                    # User passed firewall for the first time
+                    log_group = get_view_files_chat_id()
+                    username = get_username(user_id) or "Unknown"
+                    if log_group:
+                        try:
+                            bot.send_message(log_group, f"🧱 *Firewall Passed*\nUser: `{user_id}` (@{username})\nSuccessfully joined required channels.", parse_mode="Markdown")
+                        except: pass
+            else:
+                c.execute("""
+                    INSERT INTO firewall_tracking (user_id, currently_joined)
+                    VALUES (%s, FALSE)
+                    ON CONFLICT (user_id) DO UPDATE SET currently_joined = FALSE
+                """, (user_id,))
+
 @bot.chat_join_request_handler()
 def handle_join_request(request):
     user_id = request.from_user.id
@@ -4408,7 +4471,7 @@ def panel_navigation_callbacks(call):
 
 
 @bot.callback_query_handler(func=lambda call: call.data in {
-    "fw_on", "fw_off", "fw_add", "fw_remove", "vip_add", "vip_remove", "fw_status", "fw_edit_msg"
+    "fw_on", "fw_off", "fw_add", "fw_remove", "vip_add", "vip_remove", "fw_status", "fw_edit_msg", "fw_stats"
 } or call.data.startswith("fw_view:") or call.data.startswith("fw_del:") or call.data.startswith("bc_target:") or call.data.startswith("admin_unban_user:"))
 def admin_extra_callbacks(call):
     actor_id = call.from_user.id
@@ -4576,6 +4639,34 @@ def firewall_ui_callbacks(call):
         pending_fw_msg.add(actor_id)
         bot.answer_callback_query(call.id, "Awaiting message")
         bot.send_message(actor_id, "✏️ Send new firewall message:")
+        return
+
+    if call.data == "fw_stats":
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute("SELECT COUNT(*) FROM firewall_tracking WHERE msg_received=TRUE")
+                msg_count = c.fetchone()[0]
+                
+                c.execute("SELECT COUNT(*) FROM firewall_tracking WHERE passed_ever=TRUE")
+                passed_count = c.fetchone()[0]
+                
+                c.execute("SELECT COUNT(*) FROM firewall_tracking WHERE currently_joined=TRUE")
+                joined_count = c.fetchone()[0]
+                
+        stats_text = (
+            "📈 *Firewall Statistics*\n\n"
+            f"📨 *Users Received Firewall Msg:* `{msg_count}`\n"
+            f"✅ *Users Passed Firewall (Historical):* `{passed_count}`\n"
+            f"🔗 *Members Currently Joined:* `{joined_count}`"
+        )
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("🔙 Back to Firewall", callback_data="panel_firewall"))
+        
+        bot.answer_callback_query(call.id)
+        try:
+            bot.edit_message_text(stats_text, chat_id=admin_chat_id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+        except Exception:
+            pass
         return
 
 
