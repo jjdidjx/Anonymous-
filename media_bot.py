@@ -3494,20 +3494,24 @@ def stats_command(message):
     bot.send_message(
         message.chat.id,
         f"""
-📊 **BOT STATISTICS**
+📊 **SYSTEM STATUS & METRICS**
+━━━━━━━━━━━━━━━━━━━━
 
-👥 **Total Users:** `{total}`
+👥 **Total Population:** `{total}`
 
-✅ **Active:** `{active}`
-⏳ **Inactive:** `{inactive}`
-🚫 **Banned:** `{banned}`
-🌟 **VIP:** `{whitelisted}`
+✅ **Active Members:** `{active}`
+⏳ **Inactive Members:** `{inactive}`
+🚫 **Banned Users:** `{banned}`
+🌟 **VIP Users:** `{whitelisted}`
 
-📂 **Mapfile:** `{map_count}`
-♻️ **Duplicates:** `{duplicate_total}`
-⚠️ **Pending:** `{pending_setup + pending_activation}`
+⚠️ **Pending Setup:** `{pending_setup}`
+⏳ **Pending Joining:** `{pending_activation}`
+
+📂 **Mapfile Entries:** `{map_count}`
+♻️ **Duplicates Blocked:** `{duplicate_total}`
 
 🚪 **Join Status:** `{join_status}`
+━━━━━━━━━━━━━━━━━━━━
         """,
         parse_mode="Markdown"
     )
