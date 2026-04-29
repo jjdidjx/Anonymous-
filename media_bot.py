@@ -4239,6 +4239,16 @@ def check_join_callback(call):
         bot.answer_callback_query(call.id, "✅ Verified!")
         with last_fw_msg_lock:
             last_fw_msg.pop(int(user_id), None)
+            
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute("""
+                    INSERT INTO firewall_tracking (user_id, passed_ever, currently_joined)
+                    VALUES (%s, TRUE, TRUE)
+                    ON CONFLICT (user_id) DO UPDATE SET 
+                        passed_ever = TRUE, 
+                        currently_joined = TRUE
+                """, (user_id,))
         try:
             bot.edit_message_text(
                 "✅ You have joined all required channels.\n\n🎉 Access granted!",
