@@ -2496,9 +2496,8 @@ def _process_album(messages):
                             rows.append((sent.message_id, sender_id, original_message_id, user_id, now))
                     if FORWARD_DELAY > 0:
                         time.sleep(FORWARD_DELAY)
-                    # Proactively pace album sends to prevent massive 429 timeouts.
-                    # Each media item = 1 message. Telegram limit is 30 msgs/sec.
-                    time.sleep(len(chunk_media) * 0.05)
+                    # Pace to ~22 req/sec across 8 threads to completely avoid 429
+                    time.sleep(0.35)
                     break
                 except Exception as e:
                     print("Album send_media_group error:", e)
@@ -2512,8 +2511,7 @@ def _process_album(messages):
                     break
         return rows
 
-    # Albums are extremely heavy on rate limits. Cap workers to prevent instant 429 errors.
-    workers = max(1, min(2, len(targets)))
+    workers = max(1, min(SEND_MAX_WORKERS, len(targets)))
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(send_album_to_user, user_id) for user_id in targets]
         for future in as_completed(futures):
