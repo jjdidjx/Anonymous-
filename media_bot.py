@@ -4230,6 +4230,9 @@ def check_join_callback(call):
             except Exception:
                 pass
             bot.send_message(user_id, "🎉 You have joined all required channels.\n\nAccess granted!")
+            
+        if not get_username(user_id):
+            bot.send_message(user_id, get_welcome_message())
     else:
         missing_str = "\n".join([f"• {name}" for name in missing])
         prefix = f"⚠️ *Still missing membership in:*\n{missing_str}\n\nPlease join them and try again."
@@ -4267,10 +4270,17 @@ def handle_chat_member_update(message):
                 if not row or not row[0]:
                     # User passed firewall for the first time
                     log_group = get_view_files_chat_id()
-                    username = get_username(user_id) or "Unknown"
+                    username = get_username(user_id)
+                    display_name = username or "Unknown"
                     if log_group:
                         try:
-                            bot.send_message(log_group, f"🧱 *Firewall Passed*\nUser: `{user_id}` (@{username})\nSuccessfully joined required channels.", parse_mode="Markdown")
+                            bot.send_message(log_group, f"🧱 *Firewall Passed*\nUser: `{user_id}` (@{display_name})\nSuccessfully joined required channels.", parse_mode="Markdown")
+                        except: pass
+                    
+                    if not username:
+                        try:
+                            bot.send_message(user_id, "🎉 You have joined all required channels.\n\nAccess granted!")
+                            bot.send_message(user_id, get_welcome_message())
                         except: pass
             else:
                 c.execute("""
