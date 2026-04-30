@@ -2494,21 +2494,17 @@ def _process_album(messages):
                     if store_mapping and sent_msgs:
                         for sent, original_message_id in zip(sent_msgs, [item[1] for item in chunk]):
                             rows.append((sent.message_id, sender_id, original_message_id, user_id, now))
-                    if FORWARD_DELAY > 0:
-                        time.sleep(FORWARD_DELAY)
-                    # Pace to ~22 req/sec across 8 threads to completely avoid 429
-                    time.sleep(0.35)
                     break
                 except Exception as e:
-                    print("Album send_media_group error:", e)
                     wait = _retry_after_seconds(e)
-                    if i < attempts - 1:
-                        if wait is not None:
-                            time.sleep(max(0.05, wait))
-                        else:
-                            time.sleep(0.15 * (i + 1))
-                        continue
-                    break
+                    if wait is not None:
+                        print(f"Album 429 rate-limit: waiting {wait}s before retry")
+                        time.sleep(max(1.0, wait))
+                    elif i < attempts - 1:
+                        time.sleep(0.3 * (i + 1))
+                    else:
+                        print("Album send_media_group error:", e)
+                    continue
         return rows
 
     workers = max(1, min(SEND_MAX_WORKERS, len(targets)))
@@ -3023,11 +3019,12 @@ def force_join_enforcement_scheduler():
 
 def start_background_workers():
 
-    # Broadcast Worker
-    threading.Thread(
-        target=broadcast_worker,
-        daemon=True
-    ).start()
+    # Broadcast Workers (3 parallel workers to handle concurrent media relaying)
+    for _ in range(3):
+        threading.Thread(
+            target=broadcast_worker,
+            daemon=True
+        ).start()
 
     # Inactivity Scheduler
     threading.Thread(
