@@ -2894,6 +2894,11 @@ def relay(message):
 
         if is_dup:
             return  # silently ignore and DO NOT count activation
+
+    # 🆕 Ensure user exists in database even if they bypassed /start
+    if not user_exists(message.chat.id):
+        add_user(message.chat.id, message.from_user.first_name, message.from_user.last_name, message.from_user.username)
+
     if handle_restrictions(message):
         return
     # =========================
