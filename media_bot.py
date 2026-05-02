@@ -1394,8 +1394,10 @@ def is_user_joined_detailed(user_id, force_refresh=False):
                     return None
                 return c_name
             except Exception as e:
-                # Fail closed: If bot lacks permissions, block the user so the admin realizes it's broken
-                return f"{c_name} (⚠️ Bot Misconfigured)"
+                # Provide the exact error for debugging
+                err_msg = str(e).replace("A request to the Telegram API was unsuccessful. Error code: 400. Description: ", "")
+                print(f"Firewall API Error for {c_id}: {e}")
+                return f"{c_name} (⚠️ Error: {err_msg})"
 
         # Use parallel checks to avoid sequential network delays
         with ThreadPoolExecutor(max_workers=len(channels_to_check)) as executor:
