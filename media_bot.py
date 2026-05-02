@@ -112,14 +112,23 @@ pending_admin_setwelcome = set()
 pending_admin_setinactive = set()
 pending_admin_setcontact = set()
 pending_admin_addforward = set()
-pending_admin_search_user = set()
-pending_admin_msg_target = {} # admin_id -> target_user_id
-pending_admin_set_note = {}   # admin_id -> target_user_id
-
-# 🔥 NEW: High-speed firewall cache
+# 🔥 NEW: High-speed metadata caches
 firewall_cache_lock = threading.Lock()
 cached_firewall_joined = set() 
 firewall_cache_at = 0.0
+
+user_metadata_cache_lock = threading.Lock()
+cached_usernames = {} # id -> name
+cached_reputations = {} # id -> rep
+metadata_cache_at = 0.0
+
+forward_targets_lock = threading.Lock()
+cached_forwards = []
+forwards_cache_at = 0.0
+
+# 🚀 Global Thread Pool for sending
+SEND_EXECUTOR = ThreadPoolExecutor(max_workers=SEND_MAX_WORKERS * 2)
+
 force_join_cache_lock = threading.Lock()
 force_join_cache = {}
 force_join_reminder_lock = threading.Lock()
@@ -144,21 +153,19 @@ def refresh_caches():
             new_admins = {row[0] for row in c.fetchall()}
             
             # Refresh VIPs
-            c.execute("SELECT user_id FROM vip_users")
-            new_vips = {row[0] for row in c.fetchall()}
-            
-            # Refresh Force Join Status
-            c.execute("SELECT value FROM settings WHERE key='force_join_enabled'")
-            row = c.fetchone()
-            new_fj = bool(row and row[0] == "true")
     """Warms up all in-memory caches to ensure maximum performance at startup."""
-    global cached_admins, cached_vips, firewall_cache_at, cached_firewall_joined
+    global cached_admins, cached_vips, firewall_cache_at, cached_firewall_joined, cached_forwards, forwards_cache_at
     
     print("⚡ Refreshing system caches...")
     
     with cache_lock:
         cached_admins = set(get_admin_ids())
         cached_vips = set(get_vip_ids())
+    
+    # Refresh forwards
+    with forward_targets_lock:
+        cached_forwards = get_forward_targets()
+        forwards_cache_at = time.time()
     
     # Refresh firewall cache
     with firewall_cache_lock:
@@ -171,7 +178,11 @@ def refresh_caches():
         except Exception as e:
             print(f"Firewall cache refresh error: {e}")
             
-    print(f"⚡ Cache refreshed: {len(cached_admins)} admins, {len(cached_vips)} VIPs, Firewall: {'ON' if is_force_join_enabled() else 'OFF'} ({len(cached_firewall_joined)} joined)")
+    print(f"⚡ Cache refreshed: {len(cached_admins)} admins, {len(cached_vips)} VIPs, Log Groups: {len(cached_forwards)}")
+
+def is_force_join_enabled():
+    with cache_lock:
+        return cached_force_join
 
 def get_firewall_joined_cached():
     """Returns the set of users who have passed the firewall, with a 30s TTL."""
@@ -688,6 +699,41 @@ def get_username(user_id):
             return row[0] if row else None
 
 
+def get_username_cached(user_id):
+    now = time.time()
+    with user_metadata_cache_lock:
+        if user_id in cached_usernames and now - metadata_cache_at < 60:
+            return cached_usernames[user_id]
+    
+    name = get_username(user_id)
+    with user_metadata_cache_lock:
+        cached_usernames[user_id] = name
+    return name
+
+
+def get_reputation(user_id):
+    with get_connection() as conn:
+        with conn.cursor() as c:
+            c.execute(
+                "SELECT reputation FROM users WHERE user_id=%s",
+                (user_id,)
+            )
+            row = c.fetchone()
+            return row[0] if row else "Neutral"
+
+
+def get_reputation_cached(user_id):
+    now = time.time()
+    with user_metadata_cache_lock:
+        if user_id in cached_reputations and now - metadata_cache_at < 60:
+            return cached_reputations[user_id]
+    
+    rep = get_reputation(user_id)
+    with user_metadata_cache_lock:
+        cached_reputations[user_id] = rep
+    return rep
+
+
 def set_username(user_id, username):
     with get_connection() as conn:
         with conn.cursor() as c:
@@ -803,6 +849,18 @@ def import_recovery_payload(payload):
 # 👑 ADMIN HELPERS
 # =========================
 
+def get_admin_ids():
+    with get_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT user_id FROM admins")
+            return [row[0] for row in c.fetchall()]
+
+def get_vip_ids():
+    with get_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT user_id FROM vip_users")
+            return [row[0] for row in c.fetchall()]
+
 def is_admin(user_id):
     with cache_lock:
         if user_id in cached_admins:
@@ -833,7 +891,7 @@ def should_store_mapping(sender_id, receivers=None):
                 if any(uid in cached_admins for uid in receivers):
                     return True
         # If we have any forward targets (log groups), we usually want mapping
-        if get_forward_targets():
+        if get_forwards_cached():
             return True
         return False
     return True
@@ -881,13 +939,10 @@ def get_forward_targets():
             return [row[0] for row in c.fetchall()]
 
 def build_prefix(user_id):
-
-    username = get_username(user_id)
-
-    if username:
-        return f"{username}~\n"
-
-    return "👤 Unknown\n"
+    username = get_username_cached(user_id) or "Unknown"
+    reputation = get_reputation_cached(user_id)
+    emoji = {"Trusted": "👑", "Neutral": "👤", "Suspicious": "⚠️", "Scammer": "🚫"}.get(reputation, "👤")
+    return f"{emoji} <b>{username}:</b> "
 
 # =========================
 # 🚫 BAN HELPERS
@@ -1142,11 +1197,6 @@ def _normalize_force_join_chat(raw_value):
 def _clear_force_join_cache():
     with force_join_cache_lock:
         force_join_cache.clear()
-
-
-def is_force_join_enabled():
-    with cache_lock:
-        return cached_force_join
 
 
 def get_force_join_channels():
@@ -2320,7 +2370,7 @@ def _send_text_with_retry(user_id, text, reply_to_message_id=None):
 
 
 def broadcast_warning_notice(sender_id, target_id, warnings, reason):
-    username = get_username(target_id) or "Unknown"
+    username = get_username_cached(target_id) or "Unknown"
     text = (
         "⚠️ USER WARNING\n\n"
         f"👤 {username}\n"
@@ -2329,7 +2379,7 @@ def broadcast_warning_notice(sender_id, target_id, warnings, reason):
         f"📝 Reason: {reason}"
     )
     receivers = [uid for uid in get_receivers_cached() if uid != sender_id]
-    extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
+    extra_targets = [cid for cid in get_forwards_cached() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
     if not targets:
         return 0
@@ -2357,7 +2407,7 @@ def admin_broadcast_text(sender_id, text):
             uid for uid in receivers
             if is_admin(uid) or is_vip(uid) or is_user_joined(uid)
         ]
-    extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
+    extra_targets = [cid for cid in get_forwards_cached() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
     if not targets:
         return 0
@@ -2408,11 +2458,15 @@ def _process_single(message):
     sender_id = message.chat.id
     receivers = [uid for uid in get_receivers_cached() if uid != sender_id]
     
-    if is_force_join_enabled():
-        joined_uids = get_firewall_joined_cached()
-        with cache_lock:
-            receivers = [uid for uid in receivers if uid in cached_admins or uid in cached_vips or uid in joined_uids]
-    extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
+    joined_uids = get_firewall_joined_cached() if is_force_join_enabled() else set()
+    
+    with cache_lock:
+        receivers = [
+            uid for uid in receivers
+            if uid in cached_admins or uid in cached_vips or uid in joined_uids
+        ]
+    
+    extra_targets = [cid for cid in get_forwards_cached() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
     store_mapping = should_store_mapping(sender_id, targets)
     mappings = []
@@ -2449,7 +2503,7 @@ def _process_single(message):
 
     else:
         media_caption = get_media_caption()
-        username = get_username(sender_id) or ''
+        username = get_username_cached(sender_id) or ''
         original_caption = message.caption or ""
 
         if is_admin(sender_id):
@@ -2478,23 +2532,24 @@ def _process_single(message):
             return None
         return send_fn(uid)
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_uid = {
-            executor.submit(dispatch_send, user_id): user_id
-            for user_id in targets
-        }
-        for future in as_completed(future_to_uid):
-            user_id = future_to_uid[future]
-            try:
-                sent = future.result()
-                if sent and store_mapping:
-                    mappings.append((sent.message_id, sender_id, message.message_id, user_id, now))
-                    if len(mappings) >= MAP_INSERT_BATCH_SIZE:
-                        save_mappings(mappings)
-                        mappings.clear()
-            except Exception as e:
-                print("Single send error:", e)
-    if store_mapping:
+    # Use shared global executor for massive performance boost
+    future_to_uid = {
+        SEND_EXECUTOR.submit(dispatch_send, user_id): user_id
+        for user_id in targets
+    }
+    for future in as_completed(future_to_uid):
+        user_id = future_to_uid[future]
+        try:
+            sent = future.result()
+            if sent and store_mapping:
+                mappings.append((sent.message_id, sender_id, message.message_id, user_id, now))
+                if len(mappings) >= MAP_INSERT_BATCH_SIZE:
+                    save_mappings(mappings)
+                    mappings.clear()
+        except Exception as e:
+            print("Single send error:", e)
+    
+    if store_mapping and mappings:
         save_mappings(mappings)
 
    
@@ -2511,7 +2566,7 @@ def _process_album(messages):
         joined_uids = get_firewall_joined_cached()
         with cache_lock:
             receivers = [uid for uid in receivers if uid in cached_admins or uid in cached_vips or uid in joined_uids]
-    extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
+    extra_targets = [cid for cid in get_forwards_cached() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
     store_mapping = should_store_mapping(sender_id, targets)
     mappings = []
@@ -2519,7 +2574,7 @@ def _process_album(messages):
     if not targets:
         return
     media_caption = get_media_caption()
-    username = get_username(sender_id) or 'Unknown'
+    username = get_username_cached(sender_id) or 'Unknown'
     media_items = []
     
     for index, msg in enumerate(messages):
@@ -2528,7 +2583,7 @@ def _process_album(messages):
         
         if index == 0:
             original_caption = msg.caption or ""
-            username = get_username(sender_id) or ''
+            username = get_username_cached(sender_id) or ''
             
             if is_admin(sender_id):
                 if media_caption:
@@ -2597,18 +2652,18 @@ def _process_album(messages):
                     continue
         return rows
 
-    workers = max(1, min(SEND_MAX_WORKERS, len(targets)))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(send_album_to_user, user_id) for user_id in targets]
-        for future in as_completed(futures):
-            try:
-                mappings.extend(future.result())
-                if len(mappings) >= MAP_INSERT_BATCH_SIZE:
-                    save_mappings(mappings)
-                    mappings.clear()
-            except Exception as e:
-                print("Album send error:", e)
-    if store_mapping:
+    # Use shared global executor for massive performance boost
+    futures = [SEND_EXECUTOR.submit(send_album_to_user, user_id) for user_id in targets]
+    for future in as_completed(futures):
+        try:
+            mappings.extend(future.result())
+            if len(mappings) >= MAP_INSERT_BATCH_SIZE:
+                save_mappings(mappings)
+                mappings.clear()
+        except Exception as e:
+            print("Album send error:", e)
+    
+    if store_mapping and mappings:
         save_mappings(mappings)
     # external_forward.forward_album(bot, messages)
 
@@ -3109,8 +3164,8 @@ def force_join_enforcement_scheduler():
 
 def start_background_workers():
 
-    # Broadcast Workers (5 parallel workers to handle concurrent media relaying)
-    for _ in range(5):
+    # Broadcast Workers (10 parallel workers to handle concurrent media relaying)
+    for _ in range(10):
         threading.Thread(
             target=broadcast_worker,
             daemon=True
