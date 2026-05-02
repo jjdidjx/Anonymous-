@@ -1379,7 +1379,8 @@ def is_user_joined_detailed(user_id, force_refresh=False):
         verifiable_channels.append(channel)
 
     if not verifiable_channels:
-        return True, []
+        # Fail closed: If admin enabled firewall but added invalid channels, block until fixed
+        return False, ["⚠️ Bot Misconfigured (Tell Admin)"]
 
     joined = True
     missing_channels = []
@@ -1395,9 +1396,7 @@ def is_user_joined_detailed(user_id, force_refresh=False):
                 return None
             return c_name
         except Exception as e:
-            err = str(e).lower()
-            if any(x in err for x in ["chat not found", "bot was kicked", "user not found", "member list is inaccessible"]):
-                return None # Don't block if bot can't see channel
+            # Fail closed: If bot lacks permissions, block the user so the admin realizes it's broken
             return c_name
 
     # Use parallel checks to avoid sequential network delays
