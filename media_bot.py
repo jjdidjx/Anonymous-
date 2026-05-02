@@ -65,12 +65,12 @@ def get_new_user_grace_hours():
     return 1  # 1 hour base fallback
 
 FORWARD_DELAY = float(os.getenv("FORWARD_DELAY", "0.01"))
-SEND_MAX_WORKERS = int(os.getenv("SEND_MAX_WORKERS", "8"))
+SEND_MAX_WORKERS = int(os.getenv("SEND_MAX_WORKERS", "30"))
 SEND_RETRIES = int(os.getenv("SEND_RETRIES", "2"))
 RECEIVER_CACHE_TTL = int(os.getenv("RECEIVER_CACHE_TTL", "10"))
-BROADCAST_QUEUE_SIZE = int(os.getenv("BROADCAST_QUEUE_SIZE", "2000"))
+BROADCAST_QUEUE_SIZE = int(os.getenv("BROADCAST_QUEUE_SIZE", "5000"))
 DB_POOL_MIN_CONN = int(os.getenv("DB_POOL_MIN_CONN", "1"))
-DB_POOL_MAX_CONN = int(os.getenv("DB_POOL_MAX_CONN", "15"))
+DB_POOL_MAX_CONN = int(os.getenv("DB_POOL_MAX_CONN", "20"))
 MESSAGE_MAP_MODE = os.getenv("MESSAGE_MAP_MODE", "full").strip().lower()
 MAP_RETENTION_DAYS = int(os.getenv("MAP_RETENTION_DAYS", "2"))
 MAP_CLEANUP_INTERVAL_SECONDS = int(os.getenv("MAP_CLEANUP_INTERVAL_SECONDS", "300"))
@@ -121,6 +121,40 @@ force_join_reminder_lock = threading.Lock()
 force_join_reminder_at = {}
 last_fw_msg_lock = threading.Lock()
 last_fw_msg = {}
+
+# =========================
+# ⚡ GLOBAL CACHE
+# =========================
+cache_lock = threading.Lock()
+cached_admins = set()
+cached_vips = set()
+cached_force_join = False
+
+def refresh_caches():
+    global cached_force_join
+    with get_connection() as conn:
+        with conn.cursor() as c:
+            # Refresh Admins
+            c.execute("SELECT user_id FROM admins")
+            new_admins = {row[0] for row in c.fetchall()}
+            
+            # Refresh VIPs
+            c.execute("SELECT user_id FROM vip_users")
+            new_vips = {row[0] for row in c.fetchall()}
+            
+            # Refresh Force Join Status
+            c.execute("SELECT value FROM settings WHERE key='force_join_enabled'")
+            row = c.fetchone()
+            new_fj = bool(row and row[0] == "true")
+            
+    with cache_lock:
+        cached_admins.clear()
+        cached_admins.update(new_admins)
+        cached_vips.clear()
+        cached_vips.update(new_vips)
+        cached_force_join = new_fj
+    
+    print(f"⚡ Cache refreshed: {len(cached_admins)} admins, {len(cached_vips)} VIPs, Firewall: {'ON' if new_fj else 'OFF'}")
 
 # =========================
 # 🗄 DATABASE CONNECTION
@@ -732,23 +766,34 @@ def import_recovery_payload(payload):
 # =========================
 
 def is_admin(user_id):
-    with get_connection() as conn:
-        with conn.cursor() as c:
-            c.execute(
-                "SELECT 1 FROM admins WHERE user_id=%s",
-                (user_id,)
-            )
-            return c.fetchone() is not None
+    with cache_lock:
+        if user_id in cached_admins:
+            return True
+    # Fallback to DB if cache seems empty or for extra safety (though refresh_caches should handle it)
+    if not cached_admins:
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute(
+                    "SELECT 1 FROM admins WHERE user_id=%s",
+                    (user_id,)
+                )
+                return c.fetchone() is not None
+    return False
 
 
 def should_store_mapping(sender_id, receivers=None):
     if MESSAGE_MAP_MODE == "off":
         return False
+    
+    sender_is_admin = is_admin(sender_id)
+    
     if MESSAGE_MAP_MODE == "admin_only":
-        if is_admin(sender_id):
+        if sender_is_admin:
             return True
         if receivers:
-            return any(is_admin(uid) for uid in receivers)
+            # Use cached checks for massive performance boost
+            with cache_lock:
+                return any(uid in cached_admins for uid in receivers)
         return False
     return True
 
@@ -761,6 +806,8 @@ def add_admin(user_id):
                 VALUES(%s)
                 ON CONFLICT DO NOTHING
             """, (user_id,))
+    with cache_lock:
+        cached_admins.add(user_id)
 
 
 def remove_admin(user_id):
@@ -770,6 +817,8 @@ def remove_admin(user_id):
                 "DELETE FROM admins WHERE user_id=%s",
                 (user_id,)
             )
+    with cache_lock:
+        cached_admins.discard(user_id)
 
 def add_forward_target(chat_id):
     with get_connection() as conn:
@@ -1055,11 +1104,8 @@ def _clear_force_join_cache():
 
 
 def is_force_join_enabled():
-    with get_connection() as conn:
-        with conn.cursor() as c:
-            c.execute("SELECT value FROM settings WHERE key='force_join_enabled'")
-            row = c.fetchone()
-            return bool(row and row[0] == "true")
+    with cache_lock:
+        return cached_force_join
 
 
 def get_force_join_channels():
@@ -1198,6 +1244,7 @@ def set_force_join(chat_id, message):
                 ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
                 """
             )
+    refresh_caches()
     _clear_force_join_cache()
     add_force_channel(chat_id)
 
@@ -1212,17 +1259,23 @@ def disable_force_join():
                 ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
                 """
             )
+    refresh_caches()
     _clear_force_join_cache()
 
 
 def is_vip(user_id):
-    with get_connection() as conn:
-        with conn.cursor() as c:
-            c.execute(
-                "SELECT 1 FROM vip_users WHERE user_id=%s",
-                (user_id,),
-            )
-            return c.fetchone() is not None
+    with cache_lock:
+        if user_id in cached_vips:
+            return True
+    if not cached_vips:
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute(
+                    "SELECT 1 FROM vip_users WHERE user_id=%s",
+                    (user_id,),
+                )
+                return c.fetchone() is not None
+    return False
 
 
 def add_vip(user_id):
@@ -1236,6 +1289,8 @@ def add_vip(user_id):
                 """,
                 (user_id,),
             )
+    with cache_lock:
+        cached_vips.add(user_id)
     _clear_force_join_cache()
 
 
@@ -1246,6 +1301,8 @@ def remove_vip(user_id):
                 "DELETE FROM vip_users WHERE user_id=%s",
                 (user_id,),
             )
+    with cache_lock:
+        cached_vips.discard(user_id)
     _clear_force_join_cache()
 
 
@@ -2309,15 +2366,19 @@ def _process_single(message):
 
     sender_id = message.chat.id
     receivers = [uid for uid in get_receivers_cached() if uid != sender_id]
+    
     if is_force_join_enabled():
         with get_connection() as conn:
             with conn.cursor() as c:
                 c.execute("SELECT user_id, currently_joined FROM firewall_tracking WHERE user_id = ANY(%s)", (receivers,))
                 tracking_data = dict(c.fetchall())
-        receivers = [
-            uid for uid in receivers
-            if is_admin(uid) or is_vip(uid) or tracking_data.get(uid, True)
-        ]
+        
+        # Use cached sets for extremely fast filtering
+        with cache_lock:
+            receivers = [
+                uid for uid in receivers
+                if uid in cached_admins or uid in cached_vips or tracking_data.get(uid, True)
+            ]
     extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
     store_mapping = should_store_mapping(sender_id, targets)
@@ -2412,15 +2473,19 @@ def _process_album(messages):
 
     sender_id = messages[0].chat.id
     receivers = [uid for uid in get_receivers_cached() if uid != sender_id]
+    
     if is_force_join_enabled():
         with get_connection() as conn:
             with conn.cursor() as c:
                 c.execute("SELECT user_id, currently_joined FROM firewall_tracking WHERE user_id = ANY(%s)", (receivers,))
                 tracking_data = dict(c.fetchall())
-        receivers = [
-            uid for uid in receivers
-            if is_admin(uid) or is_vip(uid) or tracking_data.get(uid, True)
-        ]
+        
+        # Use cached sets for extremely fast filtering
+        with cache_lock:
+            receivers = [
+                uid for uid in receivers
+                if uid in cached_admins or uid in cached_vips or tracking_data.get(uid, True)
+            ]
     extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
     store_mapping = should_store_mapping(sender_id, targets)
@@ -3019,8 +3084,8 @@ def force_join_enforcement_scheduler():
 
 def start_background_workers():
 
-    # Broadcast Workers (3 parallel workers to handle concurrent media relaying)
-    for _ in range(3):
+    # Broadcast Workers (5 parallel workers to handle concurrent media relaying)
+    for _ in range(5):
         threading.Thread(
             target=broadcast_worker,
             daemon=True
@@ -4611,6 +4676,7 @@ def firewall_ui_callbacks(call):
 
     if call.data == "fw_off":
         disable_force_join()
+        refresh_caches()
         bot.answer_callback_query(call.id, "🧱 Firewall Disabled")
         return
 
@@ -5399,7 +5465,8 @@ if __name__ == "__main__":
 
     init_db_pool()
     init_db()
-    print("Database ready.")
+    refresh_caches()
+    print("Database ready and cache warmed.")
 
     start_background_workers()
     print("Background workers running.")
