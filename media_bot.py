@@ -4696,14 +4696,18 @@ def firewall_ui_callbacks(call):
                     ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
                     """
                 )
-        _clear_force_join_cache()
+        refresh_caches()
         bot.answer_callback_query(call.id, "🧱 Firewall Enabled")
+        call.data = "panel_firewall"
+        panel_navigation_callbacks(call)
         return
 
     if call.data == "fw_off":
         disable_force_join()
         refresh_caches()
         bot.answer_callback_query(call.id, "🧱 Firewall Disabled")
+        call.data = "panel_firewall"
+        panel_navigation_callbacks(call)
         return
 
     if call.data == "fw_add":
