@@ -149,22 +149,21 @@ cached_vips = set()
 cached_force_join = False
 
 def refresh_caches():
-    global cached_force_join
-    with get_connection() as conn:
-        with conn.cursor() as c:
-            # Refresh Admins
-            c.execute("SELECT user_id FROM admins")
-            new_admins = {row[0] for row in c.fetchall()}
-            
-            # Refresh VIPs
     """Warms up all in-memory caches to ensure maximum performance at startup."""
-    global cached_admins, cached_vips, firewall_cache_at, cached_firewall_joined, cached_forwards, forwards_cache_at
+    global cached_admins, cached_vips, cached_force_join, firewall_cache_at, cached_firewall_joined, cached_forwards, forwards_cache_at
     
     print("⚡ Refreshing system caches...")
     
     with cache_lock:
         cached_admins = set(get_admin_ids())
         cached_vips = set(get_vip_ids())
+        
+        # Refresh Force Join Status
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute("SELECT value FROM settings WHERE key='force_join_enabled'")
+                row = c.fetchone()
+                cached_force_join = bool(row and row[0] == "true")
     
     # Refresh forwards
     with forward_targets_lock:
@@ -182,7 +181,7 @@ def refresh_caches():
         except Exception as e:
             print(f"Firewall cache refresh error: {e}")
             
-    print(f"⚡ Cache refreshed: {len(cached_admins)} admins, {len(cached_vips)} VIPs, Log Groups: {len(cached_forwards)}")
+    print(f"⚡ Cache refreshed: {len(cached_admins)} admins, {len(cached_vips)} VIPs, Firewall: {'ON' if cached_force_join else 'OFF'} ({len(cached_firewall_joined)} joined)")
 
 def is_force_join_enabled():
     with cache_lock:
@@ -2462,13 +2461,13 @@ def _process_single(message):
     sender_id = message.chat.id
     receivers = [uid for uid in get_receivers_cached() if uid != sender_id]
     
-    joined_uids = get_firewall_joined_cached() if is_force_join_enabled() else set()
-    
-    with cache_lock:
-        receivers = [
-            uid for uid in receivers
-            if uid in cached_admins or uid in cached_vips or uid in joined_uids
-        ]
+    if is_force_join_enabled():
+        joined_uids = get_firewall_joined_cached()
+        with cache_lock:
+            receivers = [
+                uid for uid in receivers
+                if uid in cached_admins or uid in cached_vips or uid in joined_uids
+            ]
     
     extra_targets = [cid for cid in get_forwards_cached() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
