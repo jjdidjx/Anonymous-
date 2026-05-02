@@ -1339,7 +1339,7 @@ def parse_force_channel_input(text):
 
 
 def is_user_joined_detailed(user_id, force_refresh=False):
-    if is_vip(user_id):
+    if is_admin(user_id) or is_vip(user_id):
         return True, []
 
     channels = get_force_join_channels()
@@ -1356,49 +1356,66 @@ def is_user_joined_detailed(user_id, force_refresh=False):
             if cached and (now - cached[1]) < FORCE_JOIN_CACHE_TTL:
                 return cached[0], []
 
-    joined = True
-    missing_channels = []
-    had_verifiable_channel = False
+    # Get all pending join requests for this user at once
+    with get_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT chat_id FROM pending_join_requests WHERE user_id=%s", (user_id,))
+            pending_chats = {row[0] for row in c.fetchall()}
 
+    verifiable_channels = []
     for channel in channels:
         chat_id = str(channel.get("chat_id", "")).strip()
-        name = str(channel.get("name") or chat_id)
         if not chat_id:
             continue
-
-        # Check if user has a pending join request for this channel
-        with get_connection() as conn:
-            with conn.cursor() as c:
-                c.execute("SELECT 1 FROM pending_join_requests WHERE user_id=%s AND chat_id=%s", (user_id, chat_id))
-                if c.fetchone():
-                    continue # Treat as joined if request is pending
-
+            
+        # Treat as joined if request is pending (numeric or username)
+        if chat_id in pending_chats:
+            continue
+            
         # Skip non-verifiable links
         if any(x in chat_id for x in ["t.me/+", "t.me/joinchat/", "/joinchat/", "t.me/c/"]):
             continue
-
-        chat_ref = int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
-        had_verifiable_channel = True
-        try:
-            member = bot.get_chat_member(chat_ref, user_id)
-            status = getattr(member, "status", "")
-            if status not in JOINED_STATUSES:
-                joined = False
-                missing_channels.append(name)
-        except Exception as e:
-            # If the bot itself has an error (e.g. Chat Not Found, or Bot not admin), 
-            # we should log it but NOT block the user based on a channel the bot can't see.
-            err_msg = str(e).lower()
-            if "chat not found" in err_msg or "bot was kicked" in err_msg or "user not found" in err_msg:
-                print(f"Skipping join check for {name} due to bot permission/config error: {e}")
-                continue 
             
-            print(f"Force join check error for {name}: {e}")
-            joined = False
-            missing_channels.append(name)
+        verifiable_channels.append(channel)
 
-    if not had_verifiable_channel:
-        joined = True
+    if not verifiable_channels:
+        return True, []
+
+    joined = True
+    missing_channels = []
+    
+    def check_channel(channel):
+        c_id = str(channel.get("chat_id")).strip()
+        c_name = str(channel.get("name") or c_id)
+        c_ref = int(c_id) if c_id.lstrip("-").isdigit() else c_id
+        
+        try:
+            member = bot.get_chat_member(c_ref, user_id)
+            if member.status in JOINED_STATUSES:
+                return None
+            return c_name
+        except Exception as e:
+            err = str(e).lower()
+            if any(x in err for x in ["chat not found", "bot was kicked", "user not found", "member list is inaccessible"]):
+                return None # Don't block if bot can't see channel
+            return c_name
+
+    # Use parallel checks to avoid sequential network delays
+    with ThreadPoolExecutor(max_workers=len(verifiable_channels)) as executor:
+        results = list(executor.map(check_channel, verifiable_channels))
+        
+    missing_channels = [res for res in results if res is not None]
+    joined = len(missing_channels) == 0
+
+    # Sync with database tracking table for relay accuracy
+    if joined:
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute("""
+                    INSERT INTO firewall_tracking (user_id, passed_ever, currently_joined)
+                    VALUES (%s, TRUE, TRUE)
+                    ON CONFLICT (user_id) DO UPDATE SET currently_joined = TRUE
+                """, (user_id,))
 
     with force_join_cache_lock:
         force_join_cache[cache_key] = (joined, now)
@@ -2381,7 +2398,7 @@ def _process_single(message):
         with cache_lock:
             receivers = [
                 uid for uid in receivers
-                if uid in cached_admins or uid in cached_vips or tracking_data.get(uid, True)
+                if uid in cached_admins or uid in cached_vips or tracking_data.get(uid, False)
             ]
     extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
@@ -2488,7 +2505,7 @@ def _process_album(messages):
         with cache_lock:
             receivers = [
                 uid for uid in receivers
-                if uid in cached_admins or uid in cached_vips or tracking_data.get(uid, True)
+                if uid in cached_admins or uid in cached_vips or tracking_data.get(uid, False)
             ]
     extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
