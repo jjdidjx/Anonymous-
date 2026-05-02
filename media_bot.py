@@ -3581,6 +3581,8 @@ def stats_command(message):
             c.execute("SELECT COALESCE(SUM(duplicate_count), 0) FROM media_duplicates")
             duplicate_total = c.fetchone()[0]
     join_status = "OPEN" if is_join_open() else "CLOSED"
+    inactivity_limit_hrs = get_inactivity_limit() // 3600
+    grace_hrs = get_new_user_grace_hours()
 
     bot.send_message(
         message.chat.id,
@@ -3602,6 +3604,8 @@ def stats_command(message):
 ♻️ **Duplicates Blocked:** `{duplicate_total}`
 
 🚪 **Join Status:** `{join_status}`
+⏱ **Active Window:** `{inactivity_limit_hrs} Hours`
+🎁 **New User Grace:** `{grace_hrs} Hours`
 ━━━━━━━━━━━━━━━━━━━━
         """,
         parse_mode="Markdown"
