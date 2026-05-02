@@ -112,6 +112,10 @@ pending_admin_setwelcome = set()
 pending_admin_setinactive = set()
 pending_admin_setcontact = set()
 pending_admin_addforward = set()
+pending_admin_search_user = set()
+pending_admin_msg_target = {} # admin_id -> target_user_id
+pending_admin_set_note = {}   # admin_id -> target_user_id
+
 # 🔥 NEW: High-speed metadata caches
 firewall_cache_lock = threading.Lock()
 cached_firewall_joined = set() 
