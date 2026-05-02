@@ -785,15 +785,18 @@ def should_store_mapping(sender_id, receivers=None):
     if MESSAGE_MAP_MODE == "off":
         return False
     
-    sender_is_admin = is_admin(sender_id)
-    
     if MESSAGE_MAP_MODE == "admin_only":
-        if sender_is_admin:
+        # Always store if an admin is the sender or if any receiver is an admin
+        # Or if there are log groups (extra targets)
+        with cache_lock:
+            if sender_id in cached_admins:
+                return True
+            if receivers:
+                if any(uid in cached_admins for uid in receivers):
+                    return True
+        # If we have any forward targets (log groups), we usually want mapping
+        if get_forward_targets():
             return True
-        if receivers:
-            # Use cached checks for massive performance boost
-            with cache_lock:
-                return any(uid in cached_admins for uid in receivers)
         return False
     return True
 
@@ -3607,110 +3610,105 @@ def stats_command(message):
 @bot.message_handler(commands=['info'])
 def info_command(message):
     if not is_admin(message.chat.id):
+        # Optional: bot.reply_to(message, "❌ Admin access required.")
         return
 
     if not message.reply_to_message:
-        bot.send_message(message.chat.id, "❌ *Error:* Reply to a relayed message to get user info.", parse_mode="Markdown")
+        bot.send_message(message.chat.id, "❌ <b>Error:</b> Reply to a relayed message to get user info.", parse_mode="HTML")
         return
 
-    bot_msg_id = message.reply_to_message.message_id
-    user_id = get_original_sender(bot_msg_id, message.chat.id)
-
-    if not user_id:
-        bot.send_message(message.chat.id, "❌ *Error:* User not found in database.", parse_mode="Markdown")
-        return
-
-    # Trigger the premium profile logic via callback-style invocation
-    data = f"admin_user_info:{user_id}:0:all"
-    
-    # Simple object to mimic a callback object
-    class FakeCall:
-        def __init__(self, msg, data):
-            self.message = msg
-            self.data = data
-            self.from_user = msg.from_user
-            self.id = "0"
-            
-    fake_call = FakeCall(message, data)
-    
-    # We call admin_callbacks but we need to ensure it doesn't try to bot.answer_callback_query("0")
-    # Actually, we can just call the specific handler if we can find it, but calling admin_callbacks is fine
-    # because it will just ignore the answer_callback_query error or handle it.
-    
-    # Alternative: Just perform a send_message with the profile text directly.
-    # Let's just do it directly to be safe and clean.
-    
-    with get_connection() as conn:
-        with conn.cursor() as c:
-            c.execute("""
-                SELECT u.username, u.joined_at, u.last_activation_time, u.total_media_sent, COUNT(r.user_id),
-                       u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
-                FROM users u
-                LEFT JOIN users r ON r.referred_by = u.user_id
-                WHERE u.user_id = %s
-                GROUP BY u.user_id, u.username, u.joined_at, u.last_activation_time, u.total_media_sent, u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
-            """, (user_id,))
-            row = c.fetchone()
-            
-    if not row:
-        bot.send_message(message.chat.id, "❌ User not found.")
-        return
+    try:
+        bot_msg_id = message.reply_to_message.message_id
+        # Try direct mapping first (for this chat)
+        user_id = get_original_sender(bot_msg_id, message.chat.id)
         
-    bot_username, joined_at, last_active, media, refs, first_name, last_name, notes, reputation, tg_username = row
-    now = int(time.time())
-    import datetime
-    joined_str = datetime.datetime.fromtimestamp(joined_at).strftime('%d %b %Y') if joined_at else "Unknown"
-    
-    status_str = "🔴 Inactive"
-    if last_active:
-        time_passed = now - last_active
-        time_left = max(0, get_inactivity_limit() - time_passed)
-        if time_left > 0:
-            status_str = f"🟢 {time_left // 3600}h {(time_left % 3600) // 60}m"
+        # Fallback: Try global mapping (if admin is replying in a group where mapping isn't perfect)
+        if not user_id:
+            user_id = get_original_sender(bot_msg_id)
+
+        if not user_id:
+            bot.send_message(message.chat.id, "❌ <b>Error:</b> User not found in database for this message.", parse_mode="HTML")
+            return
+
+        with get_connection() as conn:
+            with conn.cursor() as c:
+                c.execute("""
+                    SELECT u.username, u.joined_at, u.last_activation_time, u.total_media_sent, COUNT(r.user_id),
+                           u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
+                    FROM users u
+                    LEFT JOIN users r ON r.referred_by = u.user_id
+                    WHERE u.user_id = %s
+                    GROUP BY u.user_id, u.username, u.joined_at, u.last_activation_time, u.total_media_sent, u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
+                """, (user_id,))
+                row = c.fetchone()
+                
+        if not row:
+            bot.send_message(message.chat.id, "❌ <b>Error:</b> Profile data not found for user ID.")
+            return
+            
+        bot_username, joined_at, last_active, media, refs, first_name, last_name, notes, reputation, tg_username = row
+        now = int(time.time())
+        import datetime
+        joined_str = datetime.datetime.fromtimestamp(joined_at).strftime('%d %b %Y') if joined_at else "Unknown"
         
-    rep_emoji = {"Trusted": "👑", "Neutral": "👤", "Suspicious": "⚠️", "Scammer": "🚫"}.get(reputation, "👤")
-    full_name = f"{first_name or ''} {last_name or ''}".strip() or "Anonymous"
-    display_tg_user = f"@{tg_username}" if tg_username else "No Username"
-    
-    text = (
-        f"💳 *USER ID CARD*\n"
-        f"────────────────────\n"
-        f"👤 *Identity:* `{escape_markdown(full_name)}`\n"
-        f"🌐 *Alias:* `{escape_markdown(display_tg_user)}`\n"
-        f"🤖 *Bot ID:* `{escape_markdown(bot_username or 'None')}`\n"
-        f"🆔 *Serial:* `{user_id}`\n"
-        f"────────────────────\n"
-        f"📊 *DATA LOGS*\n"
-        f"📸 Uploads: `{media}` | 👥 Refs: `{refs}`\n"
-        f"⏱ Window: {status_str}\n"
-        f"────────────────────\n"
-        f"🏷 *Rep:* {rep_emoji} *{reputation}*\n"
-        f"📅 *Born:* `{joined_str}`\n\n"
-        f"📝 *NOTES:*\n"
-        f"_{escape_markdown(notes or 'No data recorded.')}_"
-    )
-    
-    markup = InlineKeyboardMarkup(row_width=2)
-    
-    dm_url = f"https://t.me/{tg_username}" if tg_username else f"tg://user?id={user_id}"
-    
-    markup.add(
-        InlineKeyboardButton("📂 View Files", callback_data=f"admin_view_files:{user_id}"),
-        InlineKeyboardButton("✉️ Message", callback_data=f"admin_msg_user:{user_id}")
-    )
-    markup.add(
-        InlineKeyboardButton("👤 Direct DM", url=dm_url),
-        InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{user_id}")
-    )
-    markup.add(
-        InlineKeyboardButton("📝 Edit Note", callback_data=f"admin_start_note:{user_id}"),
-        InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{user_id}")
-    )
-    markup.add(
-        InlineKeyboardButton("🔙 Close", callback_data="delete_message")
-    )
-    
-    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
+        status_str = "🔴 Inactive"
+        if last_active:
+            time_passed = now - last_active
+            time_left = max(0, get_inactivity_limit() - time_passed)
+            if time_left > 0:
+                status_str = f"🟢 {time_left // 3600}h {(time_left % 3600) // 60}m"
+            
+        rep_emoji = {"Trusted": "👑", "Neutral": "👤", "Suspicious": "⚠️", "Scammer": "🚫"}.get(reputation, "👤")
+        full_name = f"{first_name or ''} {last_name or ''}".strip() or "Anonymous"
+        display_tg_user = f"@{tg_username}" if tg_username else "No Username"
+        
+        # Use HTML for better stability
+        from telebot.util import smart_split
+        
+        def h_esc(text):
+            if not text: return ""
+            return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+        text = (
+            f"💳 <b>USER ID CARD</b>\n"
+            f"────────────────────\n"
+            f"👤 <b>Identity:</b> <code>{h_esc(full_name)}</code>\n"
+            f"🌐 <b>Alias:</b> <code>{h_esc(display_tg_user)}</code>\n"
+            f"🤖 <b>Bot ID:</b> <code>{h_esc(bot_username or 'None')}</code>\n"
+            f"🆔 <b>Serial:</b> <code>{user_id}</code>\n"
+            f"────────────────────\n"
+            f"📊 <b>DATA LOGS</b>\n"
+            f"📸 Uploads: <code>{media}</code> | 👥 Refs: <code>{refs}</code>\n"
+            f"⏱ Window: {status_str}\n"
+            f"────────────────────\n"
+            f"🏷 <b>Rep:</b> {rep_emoji} <b>{reputation}</b>\n"
+            f"📅 <b>Born:</b> <code>{joined_str}</code>\n\n"
+            f"📝 <b>NOTES:</b>\n"
+            f"<i>{h_esc(notes or 'No data recorded.')}</i>"
+        )
+        
+        markup = InlineKeyboardMarkup(row_width=2)
+        dm_url = f"https://t.me/{tg_username}" if tg_username else f"tg://user?id={user_id}"
+        
+        markup.add(
+            InlineKeyboardButton("📂 View Files", callback_data=f"admin_view_files:{user_id}"),
+            InlineKeyboardButton("✉️ Message", callback_data=f"admin_msg_user:{user_id}")
+        )
+        markup.add(
+            InlineKeyboardButton("👤 Direct DM", url=dm_url),
+            InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{user_id}")
+        )
+        markup.add(
+            InlineKeyboardButton("📝 Edit Note", callback_data=f"admin_start_note:{user_id}"),
+            InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{user_id}")
+        )
+        markup.add(
+            InlineKeyboardButton("🔙 Close", callback_data="delete_message")
+        )
+        
+        bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ <b>System Error:</b> <code>{h_esc(str(e))}</code>", parse_mode="HTML")
 
 @bot.message_handler(commands=['warn'])
 def warn_command(message):
