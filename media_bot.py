@@ -3706,7 +3706,28 @@ def info_command(message):
             InlineKeyboardButton("🔙 Close", callback_data="delete_message")
         )
         
-        bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+        try:
+            bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+        except telebot.apihelper.ApiTelegramException as e:
+            if "BUTTON_USER_PRIVACY_RESTRICTED" in str(e):
+                # Privacy restricted: Remove the DM button and retry
+                new_markup = InlineKeyboardMarkup(row_width=2)
+                new_markup.add(
+                    InlineKeyboardButton("📂 View Files", callback_data=f"admin_view_files:{user_id}"),
+                    InlineKeyboardButton("✉️ Message", callback_data=f"admin_msg_user:{user_id}")
+                )
+                new_markup.add(
+                    InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{user_id}"),
+                    InlineKeyboardButton("📝 Edit Note", callback_data=f"admin_start_note:{user_id}")
+                )
+                new_markup.add(
+                    InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{user_id}"),
+                    InlineKeyboardButton("🔙 Close", callback_data="delete_message")
+                )
+                warning = "\n\n⚠️ <i>Note: Direct DM button hidden (User Privacy Restricted)</i>"
+                bot.send_message(message.chat.id, text + warning, parse_mode="HTML", reply_markup=new_markup)
+            else:
+                raise e
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ <b>System Error:</b> <code>{h_esc(str(e))}</code>", parse_mode="HTML")
 
@@ -5044,6 +5065,25 @@ def admin_callbacks(call):
         
         try:
             bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        except telebot.apihelper.ApiTelegramException as e:
+            if "BUTTON_USER_PRIVACY_RESTRICTED" in str(e):
+                # Remove the DM button and retry
+                new_markup = InlineKeyboardMarkup(row_width=2)
+                new_markup.add(
+                    InlineKeyboardButton("📂 View Files", callback_data=f"admin_view_files:{uid}"),
+                    InlineKeyboardButton("✉️ Message", callback_data=f"admin_msg_user:{uid}")
+                )
+                new_markup.add(
+                    InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{uid}"),
+                    InlineKeyboardButton("📝 Edit Note", callback_data=f"admin_start_note:{uid}")
+                )
+                new_markup.add(
+                    ban_btn,
+                    InlineKeyboardButton("🔙 Close", callback_data="delete_message")
+                )
+                bot.edit_message_text(text + "\n\n⚠️ Privacy Restricted", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=new_markup)
+            else:
+                raise e
         except Exception:
             pass
         return
