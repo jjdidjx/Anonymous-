@@ -81,7 +81,7 @@ WARNING_COOLDOWN = int(os.getenv("WARNING_COOLDOWN", "30"))
 WARNING_EXPIRY = int(os.getenv("WARNING_EXPIRY", "86400"))
 FORCE_JOIN_CACHE_TTL = int(os.getenv("FORCE_JOIN_CACHE_TTL", "30"))
 JOINED_STATUSES = ("member", "administrator", "creator", "owner", "restricted")
-FORCE_JOIN_REMINDER_COOLDOWN = int(os.getenv("FORCE_JOIN_REMINDER_COOLDOWN", "21600"))
+FORCE_JOIN_REMINDER_COOLDOWN = int(os.getenv("FORCE_JOIN_REMINDER_COOLDOWN", "60"))
 
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN")
@@ -2947,13 +2947,13 @@ def relay(message):
         bot.send_message(message.chat.id, "Bot is under maintenance. Try again later.")
         return
 
-    if is_force_join_enabled() and not is_admin(message.chat.id):
-        joined = is_user_joined(message.chat.id)
-        # Re-check once with fresh API data to avoid stale negative-cache blocking.
-        if not joined:
-            joined = is_user_joined(message.chat.id, force_refresh=True)
-        if not joined:
-            send_force_join_ui(message.chat.id)
+    if is_force_join_enabled() and not is_admin(message.chat.id) and not is_vip(message.chat.id):
+        is_joined, missing = is_user_joined_detailed(message.chat.id)
+        if not is_joined:
+            # Only send reminder if cooldown allows, to prevent spam
+            if can_send_force_join_reminder(message.chat.id):
+                send_force_join_ui(message.chat.id)
+            
             try:
                 bot.delete_message(message.chat.id, message.message_id)
             except Exception:
