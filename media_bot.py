@@ -1362,9 +1362,12 @@ def is_user_joined_detailed(user_id, force_refresh=False):
             c.execute("SELECT chat_id FROM pending_join_requests WHERE user_id=%s", (user_id,))
             pending_chats = {row[0] for row in c.fetchall()}
 
-    verifiable_channels = []
+    channels_to_check = []
+    missing_channels = []
+
     for channel in channels:
         chat_id = str(channel.get("chat_id", "")).strip()
+        c_name = str(channel.get("name") or chat_id)
         if not chat_id:
             continue
             
@@ -1372,38 +1375,36 @@ def is_user_joined_detailed(user_id, force_refresh=False):
         if chat_id in pending_chats:
             continue
             
-        # Skip non-verifiable links
+        # Fail closed on non-verifiable links
         if any(x in chat_id for x in ["t.me/+", "t.me/joinchat/", "/joinchat/", "t.me/c/"]):
+            missing_channels.append(f"{c_name} (⚠️ Bot Misconfigured)")
             continue
             
-        verifiable_channels.append(channel)
+        channels_to_check.append(channel)
 
-    if not verifiable_channels:
-        # Fail closed: If admin enabled firewall but added invalid channels, block until fixed
-        return False, ["⚠️ Bot Misconfigured (Tell Admin)"]
+    if channels_to_check:
+        def check_channel(channel):
+            c_id = str(channel.get("chat_id")).strip()
+            c_name = str(channel.get("name") or c_id)
+            c_ref = int(c_id) if c_id.lstrip("-").isdigit() else c_id
+            
+            try:
+                member = bot.get_chat_member(c_ref, user_id)
+                if member.status in JOINED_STATUSES:
+                    return None
+                return c_name
+            except Exception as e:
+                # Fail closed: If bot lacks permissions, block the user so the admin realizes it's broken
+                return f"{c_name} (⚠️ Bot Misconfigured)"
 
-    joined = True
-    missing_channels = []
-    
-    def check_channel(channel):
-        c_id = str(channel.get("chat_id")).strip()
-        c_name = str(channel.get("name") or c_id)
-        c_ref = int(c_id) if c_id.lstrip("-").isdigit() else c_id
-        
-        try:
-            member = bot.get_chat_member(c_ref, user_id)
-            if member.status in JOINED_STATUSES:
-                return None
-            return c_name
-        except Exception as e:
-            # Fail closed: If bot lacks permissions, block the user so the admin realizes it's broken
-            return c_name
-
-    # Use parallel checks to avoid sequential network delays
-    with ThreadPoolExecutor(max_workers=len(verifiable_channels)) as executor:
-        results = list(executor.map(check_channel, verifiable_channels))
-        
-    missing_channels = [res for res in results if res is not None]
+        # Use parallel checks to avoid sequential network delays
+        with ThreadPoolExecutor(max_workers=len(channels_to_check)) as executor:
+            results = list(executor.map(check_channel, channels_to_check))
+            
+        for res in results:
+            if res is not None:
+                missing_channels.append(res)
+                
     joined = len(missing_channels) == 0
 
     # Sync with database tracking table for relay accuracy
