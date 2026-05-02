@@ -64,8 +64,8 @@ def get_new_user_grace_hours():
         pass
     return 1  # 1 hour base fallback
 
-FORWARD_DELAY = float(os.getenv("FORWARD_DELAY", "0.01"))
-SEND_MAX_WORKERS = int(os.getenv("SEND_MAX_WORKERS", "30"))
+FORWARD_DELAY = float(os.getenv("FORWARD_DELAY", "0.05"))
+SEND_MAX_WORKERS = int(os.getenv("SEND_MAX_WORKERS", "15"))
 SEND_RETRIES = int(os.getenv("SEND_RETRIES", "2"))
 RECEIVER_CACHE_TTL = int(os.getenv("RECEIVER_CACHE_TTL", "10"))
 BROADCAST_QUEUE_SIZE = int(os.getenv("BROADCAST_QUEUE_SIZE", "5000"))
@@ -163,7 +163,8 @@ def refresh_caches():
 def init_db_pool():
     global db_pool
     if db_pool is None:
-        db_pool = pg_pool.SimpleConnectionPool(
+        # Use ThreadedConnectionPool for multi-threaded stability
+        db_pool = pg_pool.ThreadedConnectionPool(
             DB_POOL_MIN_CONN,
             DB_POOL_MAX_CONN,
             dsn=DATABASE_URL,
@@ -3087,8 +3088,8 @@ def force_join_enforcement_scheduler():
 
 def start_background_workers():
 
-    # Broadcast Workers (5 parallel workers to handle concurrent media relaying)
-    for _ in range(5):
+    # Broadcast Workers (3 parallel workers is optimal for rate-limit balancing)
+    for _ in range(3):
         threading.Thread(
             target=broadcast_worker,
             daemon=True
