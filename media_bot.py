@@ -2199,7 +2199,6 @@ def get_active_receivers():
                 FROM users u
                 LEFT JOIN admins a ON u.user_id = a.user_id
                 WHERE u.banned = FALSE
-                  AND u.username IS NOT NULL
                   AND (
                         a.user_id IS NOT NULL
                         OR u.whitelisted = TRUE
