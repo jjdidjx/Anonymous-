@@ -787,15 +787,15 @@ def should_store_mapping(sender_id, receivers=None):
         return False
     
     if MESSAGE_MAP_MODE == "admin_only":
-        # Always store if an admin is the sender or if any receiver is an admin
+        # Always store if an admin/VIP is the sender or if any receiver is an admin/VIP
         # Or if there are log groups (extra targets)
         with cache_lock:
-            if sender_id in cached_admins:
+            if sender_id in cached_admins or sender_id in cached_vips:
                 return True
             if receivers:
-                if any(uid in cached_admins for uid in receivers):
+                if any(uid in cached_admins or uid in cached_vips for uid in receivers):
                     return True
-        # If we have any forward targets (log groups), we usually want mapping
+        # If we have any forward targets (log groups), we always want mapping
         if get_forward_targets():
             return True
         return False
