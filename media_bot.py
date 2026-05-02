@@ -64,7 +64,7 @@ def get_new_user_grace_hours():
         pass
     return 1  # 1 hour base fallback
 
-FORWARD_DELAY = float(os.getenv("FORWARD_DELAY", "0.01"))
+FORWARD_DELAY = float(os.getenv("FORWARD_DELAY", "0.0"))
 SEND_MAX_WORKERS = int(os.getenv("SEND_MAX_WORKERS", "30"))
 SEND_RETRIES = int(os.getenv("SEND_RETRIES", "2"))
 RECEIVER_CACHE_TTL = int(os.getenv("RECEIVER_CACHE_TTL", "10"))
@@ -115,6 +115,11 @@ pending_admin_addforward = set()
 pending_admin_search_user = set()
 pending_admin_msg_target = {} # admin_id -> target_user_id
 pending_admin_set_note = {}   # admin_id -> target_user_id
+
+# 🔥 NEW: High-speed firewall cache
+firewall_cache_lock = threading.Lock()
+cached_firewall_joined = set() 
+firewall_cache_at = 0.0
 force_join_cache_lock = threading.Lock()
 force_join_cache = {}
 force_join_reminder_lock = threading.Lock()
@@ -146,15 +151,48 @@ def refresh_caches():
             c.execute("SELECT value FROM settings WHERE key='force_join_enabled'")
             row = c.fetchone()
             new_fj = bool(row and row[0] == "true")
-            
-    with cache_lock:
-        cached_admins.clear()
-        cached_admins.update(new_admins)
-        cached_vips.clear()
-        cached_vips.update(new_vips)
-        cached_force_join = new_fj
+    """Warms up all in-memory caches to ensure maximum performance at startup."""
+    global cached_admins, cached_vips, firewall_cache_at, cached_firewall_joined
     
-    print(f"⚡ Cache refreshed: {len(cached_admins)} admins, {len(cached_vips)} VIPs, Firewall: {'ON' if new_fj else 'OFF'}")
+    print("⚡ Refreshing system caches...")
+    
+    with cache_lock:
+        cached_admins = set(get_admin_ids())
+        cached_vips = set(get_vip_ids())
+    
+    # Refresh firewall cache
+    with firewall_cache_lock:
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as c:
+                    c.execute("SELECT user_id FROM firewall_tracking WHERE currently_joined = TRUE")
+                    cached_firewall_joined = {row[0] for row in c.fetchall()}
+            firewall_cache_at = time.time()
+        except Exception as e:
+            print(f"Firewall cache refresh error: {e}")
+            
+    print(f"⚡ Cache refreshed: {len(cached_admins)} admins, {len(cached_vips)} VIPs, Firewall: {'ON' if is_force_join_enabled() else 'OFF'} ({len(cached_firewall_joined)} joined)")
+
+def get_firewall_joined_cached():
+    """Returns the set of users who have passed the firewall, with a 30s TTL."""
+    global cached_firewall_joined, firewall_cache_at
+    now = time.time()
+    
+    # If firewall is off, don't bother caching/checking
+    if not is_force_join_enabled():
+        return set()
+
+    with firewall_cache_lock:
+        if now - firewall_cache_at > 30: # 30s TTL is fine for firewall
+            try:
+                with get_connection() as conn:
+                    with conn.cursor() as c:
+                        c.execute("SELECT user_id FROM firewall_tracking WHERE currently_joined = TRUE")
+                        cached_firewall_joined = {row[0] for row in c.fetchall()}
+                firewall_cache_at = now
+            except Exception:
+                pass
+        return cached_firewall_joined
 
 # =========================
 # 🗄 DATABASE CONNECTION
@@ -2371,17 +2409,9 @@ def _process_single(message):
     receivers = [uid for uid in get_receivers_cached() if uid != sender_id]
     
     if is_force_join_enabled():
-        with get_connection() as conn:
-            with conn.cursor() as c:
-                c.execute("SELECT user_id, currently_joined FROM firewall_tracking WHERE user_id = ANY(%s)", (receivers,))
-                tracking_data = dict(c.fetchall())
-        
-        # Use cached sets for extremely fast filtering
+        joined_uids = get_firewall_joined_cached()
         with cache_lock:
-            receivers = [
-                uid for uid in receivers
-                if uid in cached_admins or uid in cached_vips or tracking_data.get(uid, True)
-            ]
+            receivers = [uid for uid in receivers if uid in cached_admins or uid in cached_vips or uid in joined_uids]
     extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
     store_mapping = should_store_mapping(sender_id, targets)
@@ -2478,17 +2508,9 @@ def _process_album(messages):
     receivers = [uid for uid in get_receivers_cached() if uid != sender_id]
     
     if is_force_join_enabled():
-        with get_connection() as conn:
-            with conn.cursor() as c:
-                c.execute("SELECT user_id, currently_joined FROM firewall_tracking WHERE user_id = ANY(%s)", (receivers,))
-                tracking_data = dict(c.fetchall())
-        
-        # Use cached sets for extremely fast filtering
+        joined_uids = get_firewall_joined_cached()
         with cache_lock:
-            receivers = [
-                uid for uid in receivers
-                if uid in cached_admins or uid in cached_vips or tracking_data.get(uid, True)
-            ]
+            receivers = [uid for uid in receivers if uid in cached_admins or uid in cached_vips or uid in joined_uids]
     extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
     store_mapping = should_store_mapping(sender_id, targets)
@@ -5510,8 +5532,11 @@ def menu_command(message):
 # =========================
 
 if __name__ == "__main__":
-
-    print("Starting bot...")
+    import time
+    print("🚀 Starting Media Bot...")
+    time.sleep(5)
+    try: bot.remove_webhook()
+    except: pass
 
     init_db_pool()
     init_db()
@@ -5519,7 +5544,8 @@ if __name__ == "__main__":
     print("Database ready and cache warmed.")
 
     start_background_workers()
-    print("Background workers running.")
+    print("⚙️ Background workers running.")
 
+    print("🤖 Bot is now polling for updates...")
     bot.infinity_polling(skip_pending=True)
 
