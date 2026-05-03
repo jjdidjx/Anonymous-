@@ -3051,6 +3051,7 @@ def message_map_cleanup_scheduler():
 
     while True:
         try:
+            # --- Part 1: Time-based cleanup (remove entries older than MAP_RETENTION_DAYS) ---
             cutoff = int(time.time()) - (MAP_RETENTION_DAYS * 86400)
             while True:
                 with get_connection() as conn:
@@ -3073,10 +3074,76 @@ def message_map_cleanup_scheduler():
                         removed = len(c.fetchall())
                 if removed < MAP_DELETE_BATCH_SIZE:
                     break
+
+            # --- Part 2: Row-cap cleanup (keep only the newest 500,000 rows) ---
+            MESSAGE_MAP_ROW_CAP = 500_000
+            with get_connection() as conn:
+                with conn.cursor() as c:
+                    c.execute("SELECT COUNT(*) FROM message_map")
+                    total_rows = c.fetchone()[0]
+
+            if total_rows > MESSAGE_MAP_ROW_CAP:
+                excess = total_rows - MESSAGE_MAP_ROW_CAP
+                print(f"[Maintenance] message_map has {total_rows} rows. Pruning {excess} oldest entries.")
+                with get_connection() as conn:
+                    with conn.cursor() as c:
+                        c.execute(
+                            """
+                            DELETE FROM message_map
+                            WHERE ctid IN (
+                                SELECT ctid FROM message_map
+                                ORDER BY created_at ASC
+                                LIMIT %s
+                            )
+                            """,
+                            (excess,)
+                        )
+                print(f"[Maintenance] Pruned {excess} rows. message_map is now at cap.")
+
         except Exception as e:
             print("Cleanup error:", e)
 
         time.sleep(MAP_CLEANUP_INTERVAL_SECONDS)
+
+
+def hourly_db_backup():
+    """Every hour, export the full DB backup and DM it to the first admin."""
+    # Wait 60 minutes before the first backup so the bot has time to fully start
+    time.sleep(3600)
+    while True:
+        try:
+            admin_id = FIRST_ADMIN_ID
+            if not admin_id:
+                print("[Backup] No ADMIN_ID set — skipping hourly backup.")
+            else:
+                payload = export_recovery_payload()
+                import tempfile, json as _json
+                temp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as f:
+                        _json.dump(payload, f, ensure_ascii=False, indent=2)
+                        temp_path = f.name
+                    with open(temp_path, "rb") as doc:
+                        import datetime as _dt
+                        ts = _dt.datetime.now().strftime('%Y-%m-%d %H:%M')
+                        bot.send_document(
+                            int(admin_id),
+                            doc,
+                            caption=(
+                                f"🗄 *Hourly DB Backup*\n"
+                                f"📅 `{ts}`\n"
+                                f"This file contains all users, VIPs, settings and banned words."
+                            ),
+                            parse_mode="Markdown"
+                        )
+                    print(f"[Backup] Hourly backup sent to admin {admin_id} at {ts}.")
+                finally:
+                    if temp_path and os.path.exists(temp_path):
+                        os.unlink(temp_path)
+        except Exception as e:
+            print(f"[Backup] Hourly backup failed: {e}")
+
+        time.sleep(3600)
 
 
 def force_join_enforcement_scheduler():
@@ -3120,9 +3187,15 @@ def start_background_workers():
         daemon=True
     ).start()
 
-    # Cleanup Scheduler
+    # Cleanup Scheduler (time-based + 500k row cap)
     threading.Thread(
         target=message_map_cleanup_scheduler,
+        daemon=True
+    ).start()
+
+    # Hourly DB Backup to Admin DM
+    threading.Thread(
+        target=hourly_db_backup,
         daemon=True
     ).start()
 
