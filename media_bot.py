@@ -3658,11 +3658,11 @@ def info_command(message):
             with conn.cursor() as c:
                 c.execute("""
                     SELECT u.username, u.joined_at, u.last_activation_time, u.total_media_sent, COUNT(r.user_id),
-                           u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
+                           u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username, u.banned
                     FROM users u
                     LEFT JOIN users r ON r.referred_by = u.user_id
                     WHERE u.user_id = %s
-                    GROUP BY u.user_id, u.username, u.joined_at, u.last_activation_time, u.total_media_sent, u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username
+                    GROUP BY u.user_id, u.username, u.joined_at, u.last_activation_time, u.total_media_sent, u.first_name, u.last_name, u.admin_notes, u.reputation, u.tg_username, u.banned
                 """, (user_id,))
                 row = c.fetchone()
                 
@@ -3670,13 +3670,13 @@ def info_command(message):
             bot.send_message(message.chat.id, "❌ <b>Error:</b> Profile data not found for user ID.")
             return
             
-        bot_username, joined_at, last_active, media, refs, first_name, last_name, notes, reputation, tg_username = row
+        bot_username, joined_at, last_active, media, refs, first_name, last_name, notes, reputation, tg_username, is_banned_user = row
         now = int(time.time())
         import datetime
         joined_str = datetime.datetime.fromtimestamp(joined_at).strftime('%d %b %Y') if joined_at else "Unknown"
         
-        status_str = "🔴 Inactive"
-        if last_active:
+        status_str = "🔴 BANNED" if is_banned_user else "🔴 Inactive"
+        if not is_banned_user and last_active:
             time_passed = now - last_active
             time_left = max(0, get_inactivity_limit() - time_passed)
             if time_left > 0:
@@ -3725,9 +3725,10 @@ def info_command(message):
             markup.add(
                 InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{user_id}")
             )
+        ban_btn = InlineKeyboardButton("✅ Unban User", callback_data=f"admin_unban_user:{user_id}") if is_banned_user else InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{user_id}")
         markup.add(
             InlineKeyboardButton("📝 Edit Note", callback_data=f"admin_start_note:{user_id}"),
-            InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{user_id}")
+            ban_btn
         )
         markup.add(
             InlineKeyboardButton("🔙 Close", callback_data="delete_message")
