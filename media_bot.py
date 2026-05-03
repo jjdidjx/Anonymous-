@@ -3712,16 +3712,19 @@ def info_command(message):
         )
         
         markup = InlineKeyboardMarkup(row_width=2)
-        dm_url = f"https://t.me/{tg_username}" if tg_username else f"tg://user?id={user_id}"
-        
         markup.add(
             InlineKeyboardButton("📂 View Files", callback_data=f"admin_view_files:{user_id}"),
             InlineKeyboardButton("✉️ Message", callback_data=f"admin_msg_user:{user_id}")
         )
-        markup.add(
-            InlineKeyboardButton("👤 Direct DM", url=dm_url),
-            InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{user_id}")
-        )
+        if tg_username:
+            markup.add(
+                InlineKeyboardButton("👤 Direct DM", url=f"https://t.me/{tg_username}"),
+                InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{user_id}")
+            )
+        else:
+            markup.add(
+                InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{user_id}")
+            )
         markup.add(
             InlineKeyboardButton("📝 Edit Note", callback_data=f"admin_start_note:{user_id}"),
             InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{user_id}")
@@ -5048,17 +5051,20 @@ def admin_callbacks(call):
         )
         
         markup = InlineKeyboardMarkup(row_width=2)
-        
-        dm_url = f"https://t.me/{tg_username}" if tg_username else f"tg://user?id={uid}"
-        
         markup.add(
             InlineKeyboardButton("📂 View Files", callback_data=f"admin_view_files:{uid}"),
             InlineKeyboardButton("✉️ Message", callback_data=f"admin_msg_user:{uid}")
         )
-        markup.add(
-            InlineKeyboardButton("👤 Direct DM", url=dm_url),
-            InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{uid}")
-        )
+        
+        if tg_username:
+            markup.add(
+                InlineKeyboardButton("👤 Direct DM", url=f"https://t.me/{tg_username}"),
+                InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{uid}")
+            )
+        else:
+            markup.add(
+                InlineKeyboardButton("🏷 Set Reputation", callback_data=f"admin_show_reps:{uid}")
+            )
         
         ban_btn = InlineKeyboardButton("✅ Unban User", callback_data=f"admin_unban_user:{uid}") if is_banned_user else InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_user:{uid}")
 
