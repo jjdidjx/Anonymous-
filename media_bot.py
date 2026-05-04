@@ -3215,6 +3215,30 @@ def force_join_enforcement_scheduler():
             print("Force join check error:", e)
 
         time.sleep(300)
+
+
+def keep_alive_scheduler():
+    """Self-ping to keep Render Web Service awake."""
+    # Auto-detect Render URL if possible, otherwise fallback to manual PUBLIC_URL env
+    url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_URL")
+    
+    if not url:
+        print("📡 Keep-alive: No RENDER_EXTERNAL_URL or PUBLIC_URL found. Bot will sleep on Render Free Tier.")
+        return
+        
+    print(f"📡 Keep-alive: Starting self-ping for {url}")
+    while True:
+        try:
+            # Wait a few minutes after startup before the first ping
+            time.sleep(300)
+            
+            response = requests.get(url, timeout=10)
+            print(f"📡 Keep-alive: Ping successful! Status: {response.status_code}")
+        except Exception as e:
+            print(f"📡 Keep-alive: Ping failed: {e}")
+        
+        # Ping every 14 minutes (Render sleeps after 15m inactivity)
+        time.sleep(14 * 60)
 # =========================
 # 🚀 START BACKGROUND WORKERS
 # =========================
@@ -3255,6 +3279,12 @@ def start_background_workers():
     # Auto DB Backup (sends export to all admins every DB_BACKUP_INTERVAL_HOURS)
     threading.Thread(
         target=auto_db_backup_scheduler,
+        daemon=True
+    ).start()
+
+    # Keep Alive (for Render Free Tier)
+    threading.Thread(
+        target=keep_alive_scheduler,
         daemon=True
     ).start()
     
