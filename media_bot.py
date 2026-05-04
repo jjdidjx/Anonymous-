@@ -118,6 +118,7 @@ pending_admin_addforward = set()
 pending_admin_search_user = set()
 pending_admin_msg_target = {} # admin_id -> target_user_id
 pending_admin_set_note = {}   # admin_id -> target_user_id
+pending_name_change = set()  # user_id
 force_join_cache_lock = threading.Lock()
 force_join_cache = {}
 force_join_reminder_lock = threading.Lock()
@@ -1896,12 +1897,27 @@ def referral_command(message):
         print("Referral error:", e)
         bot.send_message(user_id, "⚠️ Failed to generate referral link. Try again later.")
 
+@bot.message_handler(commands=['setname', 'changename'])
+def set_name_cmd(message):
+    user_id = message.chat.id
+    if is_banned(user_id):
+        return
+        
+    pending_name_change.add(user_id)
+    current_name = get_username(user_id)
+    msg = "📝 *Change Bot Display Name*\n\n"
+    if current_name:
+        msg += f"Current Name: `{current_name}`\n\n"
+    msg += "Please send your *new name* (3-20 characters, no spaces)."
+    
+    bot.send_message(user_id, msg, parse_mode="Markdown")
+
 # =========================
 # 🏷 USERNAME CAPTURE
 # =========================
 
 @bot.message_handler(
-    func=lambda m: get_username(m.chat.id) is None,
+    func=lambda m: get_username(m.chat.id) is None or m.chat.id in pending_name_change,
     content_types=['text']
 )
 def capture_username(message):
@@ -1913,8 +1929,8 @@ def capture_username(message):
     if username.startswith('/'):
         return
 
-    if len(username) < 3:
-        bot.send_message(user_id, "Username too short. Try again.")
+    if len(username) < 3 or len(username) > 20:
+        bot.send_message(user_id, "Name must be between 3 and 20 characters. Try again.")
         return
 
     if username_taken(username):
@@ -1922,6 +1938,9 @@ def capture_username(message):
         return
 
     set_username(user_id, username)
+    if user_id in pending_name_change:
+        pending_name_change.remove(user_id)
+        
     if get_recovery_ban_for_username(username):
         ban_user(user_id)
         bot.send_message(user_id, "Username recovered from backup with banned status.")
