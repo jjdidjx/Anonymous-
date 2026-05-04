@@ -12,6 +12,7 @@ import random
 from contextlib import contextmanager
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 def escape_markdown(text):
     if not text:
@@ -130,6 +131,7 @@ last_fw_msg = {}
 cache_lock = threading.Lock()
 cached_admins = set()
 cached_vips = set()
+cached_whitelisted = set()
 cached_force_join = False
 
 def refresh_caches():
@@ -143,6 +145,10 @@ def refresh_caches():
             # Refresh VIPs
             c.execute("SELECT user_id FROM vip_users")
             new_vips = {row[0] for row in c.fetchall()}
+
+            # Refresh Whitelisted
+            c.execute("SELECT user_id FROM users WHERE whitelisted = TRUE")
+            new_whitelisted = {row[0] for row in c.fetchall()}
             
             # Refresh Force Join Status
             c.execute("SELECT value FROM settings WHERE key='force_join_enabled'")
@@ -154,9 +160,11 @@ def refresh_caches():
         cached_admins.update(new_admins)
         cached_vips.clear()
         cached_vips.update(new_vips)
+        cached_whitelisted.clear()
+        cached_whitelisted.update(new_whitelisted)
         cached_force_join = new_fj
     
-    print(f"⚡ Cache refreshed: {len(cached_admins)} admins, {len(cached_vips)} VIPs, Firewall: {'ON' if new_fj else 'OFF'}")
+    print(f"⚡ Cache refreshed: {len(cached_admins)} admins, {len(cached_vips)} VIPs, {len(cached_whitelisted)} whitelisted, Firewall: {'ON' if new_fj else 'OFF'}")
 
 # =========================
 # 🗄 DATABASE CONNECTION
@@ -1341,7 +1349,7 @@ def parse_force_channel_input(text):
 
 
 def is_user_joined_detailed(user_id, force_refresh=False):
-    if is_admin(user_id) or is_vip(user_id):
+    if is_admin(user_id) or is_vip(user_id) or is_whitelisted(user_id):
         return True, []
 
     channels = get_force_join_channels()
@@ -1954,6 +1962,10 @@ def handle_restrictions(message):
     user_id = message.chat.id
     state = get_user_state(user_id)
 
+    # 👑 Admin/VIP/Whitelist Bypass (Global)
+    if state == "ADMIN" or is_vip(user_id) or is_whitelisted(user_id):
+        return False
+
     # 🛡️ Force Join Check (Firewall)
     if is_force_join_enabled():
         if not is_user_joined(user_id):
@@ -1965,14 +1977,6 @@ def handle_restrictions(message):
     if state == "BANNED":
         bot.send_message(user_id, "🚫 You are banned.")
         return True
-
-    # 👑 Admin Bypass
-    if state == "ADMIN":
-        return False
-
-    # ⭐ Whitelisted = Always Active
-    if is_whitelisted(user_id):
-        return False
 
     # 🚫 Word Filter (text only)
     if message.content_type == "text":
@@ -2402,7 +2406,7 @@ def _process_single(message):
         with cache_lock:
             receivers = [
                 uid for uid in receivers
-                if uid in cached_admins or uid in cached_vips or tracking_data.get(uid, False)
+                if uid in cached_admins or uid in cached_vips or uid in cached_whitelisted or tracking_data.get(uid, False)
             ]
     extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
@@ -2509,7 +2513,7 @@ def _process_album(messages):
         with cache_lock:
             receivers = [
                 uid for uid in receivers
-                if uid in cached_admins or uid in cached_vips or tracking_data.get(uid, False)
+                if uid in cached_admins or uid in cached_vips or uid in cached_whitelisted or tracking_data.get(uid, False)
             ]
     extra_targets = [cid for cid in get_forward_targets() if cid != sender_id]
     targets = list(dict.fromkeys(receivers + extra_targets))
@@ -2969,17 +2973,18 @@ def relay(message):
     # ♻ DUPLICATE FILTER (EARLY)
     # =========================
     if message.content_type in ['photo', 'video'] and is_duplicate_filter_enabled():
+        # Bypass for Admins, VIPs, and Whitelisted users
+        if not is_admin(message.chat.id) and not is_vip(message.chat.id) and not is_whitelisted(message.chat.id):
+            file_id = (
+                message.photo[-1].file_id
+                if message.content_type == 'photo'
+                else message.video.file_id
+            )
 
-        file_id = (
-            message.photo[-1].file_id
-            if message.content_type == 'photo'
-            else message.video.file_id
-        )
+            is_dup = check_and_register_duplicate(file_id, message.chat.id)
 
-        is_dup = check_and_register_duplicate(file_id, message.chat.id)
-
-        if is_dup:
-            return  # silently ignore and DO NOT count activation
+            if is_dup:
+                return  # silently ignore and DO NOT count activation
 
     # 🆕 Ensure user exists in database even if they bypassed /start
     if not user_exists(message.chat.id):
@@ -5603,10 +5608,37 @@ def menu_command(message):
     )
 
 # =========================
+# 🌐 RENDER HEALTH CHECK
+# =========================
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+    def log_message(self, format, *args):
+        # Silence logging to keep console clean
+        return
+
+def run_health_check_server():
+    try:
+        port = int(os.getenv("PORT", "8080"))
+        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+        print(f"✅ Health check server listening on 0.0.0.0:{port}")
+        server.serve_forever()
+    except Exception as e:
+        print(f"❌ Health check server failed: {e}")
+
+# =========================
 # 🚀 MAIN BOOT
 # =========================
 
 if __name__ == "__main__":
+
+    # 1. Start Render Health Check Server IMMEDIATELY
+    threading.Thread(target=run_health_check_server, daemon=True).start()
 
     print("Starting bot...")
 
@@ -5618,5 +5650,21 @@ if __name__ == "__main__":
     start_background_workers()
     print("Background workers running.")
 
-    bot.infinity_polling(skip_pending=True)
+    # Safety delay to allow old instances to shut down on Render
+    print("Waiting for session clearance...")
+    time.sleep(5)
+    
+    try:
+        print("Cleaning up old webhooks...")
+        bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        print(f"Webhook cleanup note: {e}")
+
+    print("Bot is now polling...")
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            print(f"Polling error: {e}")
+            time.sleep(15)
 
