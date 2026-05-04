@@ -76,6 +76,8 @@ MAP_RETENTION_DAYS = int(os.getenv("MAP_RETENTION_DAYS", "2"))
 MAP_CLEANUP_INTERVAL_SECONDS = int(os.getenv("MAP_CLEANUP_INTERVAL_SECONDS", "300"))
 MAP_INSERT_BATCH_SIZE = int(os.getenv("MAP_INSERT_BATCH_SIZE", "1000"))
 MAP_DELETE_BATCH_SIZE = int(os.getenv("MAP_DELETE_BATCH_SIZE", "1000"))
+MAP_MAX_SIZE = int(os.getenv("MAP_MAX_SIZE", "500000"))  # Auto-purge oldest rows above this limit
+DB_BACKUP_INTERVAL_HOURS = int(os.getenv("DB_BACKUP_INTERVAL_HOURS", "1"))  # Auto-send DB backup every N hours
 MAX_WARNINGS = int(os.getenv("MAX_WARNINGS", "3"))
 WARNING_COOLDOWN = int(os.getenv("WARNING_COOLDOWN", "30"))
 WARNING_EXPIRY = int(os.getenv("WARNING_EXPIRY", "86400"))
@@ -3079,6 +3081,94 @@ def message_map_cleanup_scheduler():
         time.sleep(MAP_CLEANUP_INTERVAL_SECONDS)
 
 
+def message_map_overflow_guard():
+    """Auto-delete oldest message_map rows when total count exceeds MAP_MAX_SIZE."""
+    while True:
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as c:
+                    c.execute("SELECT COUNT(*) FROM message_map")
+                    total = c.fetchone()[0]
+
+            if total > MAP_MAX_SIZE:
+                to_delete = total - MAP_MAX_SIZE
+                print(f"[MapGuard] message_map has {total} rows, pruning {to_delete} oldest rows...")
+                deleted = 0
+                while deleted < to_delete:
+                    batch = min(MAP_DELETE_BATCH_SIZE, to_delete - deleted)
+                    with get_connection() as conn:
+                        with conn.cursor() as c:
+                            c.execute(
+                                """
+                                WITH batch AS (
+                                    SELECT ctid FROM message_map
+                                    ORDER BY created_at ASC
+                                    LIMIT %s
+                                )
+                                DELETE FROM message_map
+                                USING batch
+                                WHERE message_map.ctid = batch.ctid
+                                RETURNING 1
+                                """,
+                                (batch,)
+                            )
+                            removed = len(c.fetchall())
+                    deleted += removed
+                    if removed < batch:
+                        break
+                print(f"[MapGuard] Pruned {deleted} rows. New count: {total - deleted}")
+        except Exception as e:
+            print(f"[MapGuard] Error: {e}")
+        time.sleep(3600)  # check once per hour
+
+
+def auto_db_backup_scheduler():
+    """Send a DB export JSON to all admins every DB_BACKUP_INTERVAL_HOURS hours."""
+    # Wait 5 minutes after startup before the first backup
+    time.sleep(300)
+    while True:
+        try:
+            payload = export_recovery_payload()
+            temp_path = None
+            with get_connection() as conn:
+                with conn.cursor() as c:
+                    c.execute("SELECT user_id FROM admins")
+                    admin_ids = [row[0] for row in c.fetchall()]
+
+            import datetime
+            ts = datetime.datetime.utcnow().strftime("%Y-%m-%d_%H-%M")
+            with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8",
+                                            prefix=f"db_backup_{ts}_") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                temp_path = f.name
+
+            for admin_id in admin_ids:
+                try:
+                    with open(temp_path, "rb") as doc:
+                        bot.send_document(
+                            admin_id,
+                            doc,
+                            caption=(
+                                f"🗄 *Auto DB Backup*\n"
+                                f"🕐 `{ts} UTC`\n"
+                                f"📦 Contains: users, banned list, admin notes, settings"
+                            ),
+                            parse_mode="Markdown"
+                        )
+                except Exception as e:
+                    print(f"[Backup] Failed to send to admin {admin_id}: {e}")
+        except Exception as e:
+            print(f"[Backup] Export error: {e}")
+        finally:
+            try:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
+
+        time.sleep(DB_BACKUP_INTERVAL_HOURS * 3600)
+
+
 def force_join_enforcement_scheduler():
     while True:
         try:
@@ -3131,6 +3221,18 @@ def start_background_workers():
     #     target=force_join_enforcement_scheduler,
     #     daemon=True
     # ).start()
+
+    # Message Map Overflow Guard (auto-purge when > MAP_MAX_SIZE rows)
+    threading.Thread(
+        target=message_map_overflow_guard,
+        daemon=True
+    ).start()
+
+    # Auto DB Backup (sends export to all admins every DB_BACKUP_INTERVAL_HOURS)
+    threading.Thread(
+        target=auto_db_backup_scheduler,
+        daemon=True
+    ).start()
     
 # =========================
 # ADMIN COMMANDS
