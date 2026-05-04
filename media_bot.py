@@ -13,6 +13,10 @@ from contextlib import contextmanager
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
+import requests
+import psycopg2
+from psycopg2 import pool as pg_pool
 
 def escape_markdown(text):
     if not text:
@@ -184,23 +188,41 @@ def init_db_pool():
 
 @contextmanager
 def get_connection():
-    if db_pool is not None:
-        conn = db_pool.getconn()
-        use_pool = True
-    else:
-        conn = psycopg2.connect(DATABASE_URL)
-        use_pool = False
+    global db_pool
+    conn = None
+    use_pool = False
+    
     try:
+        if db_pool is not None:
+            try:
+                conn = db_pool.getconn()
+                use_pool = True
+                # Quick health check for the connection
+                with conn.cursor() as c:
+                    c.execute("SELECT 1")
+            except Exception:
+                # Connection might be stale, try to get a fresh one or re-init
+                if conn:
+                    db_pool.putconn(conn, close=True)
+                init_db_pool()
+                conn = db_pool.getconn()
+                use_pool = True
+        else:
+            conn = psycopg2.connect(DATABASE_URL)
+            use_pool = False
+
         yield conn
         conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise e
     finally:
-        if use_pool:
-            db_pool.putconn(conn)
-        else:
-            conn.close()
+        if conn:
+            if use_pool:
+                db_pool.putconn(conn)
+            else:
+                conn.close()
 # =========================
 # 🧱 DATABASE INITIALIZATION
 # =========================
@@ -3218,27 +3240,33 @@ def force_join_enforcement_scheduler():
 
 
 def keep_alive_scheduler():
-    """Self-ping to keep Render Web Service awake."""
-    # Auto-detect Render URL if possible, otherwise fallback to manual PUBLIC_URL env
+    """Self-ping to keep Render Web Service awake and check DB health."""
     url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_URL")
     
-    if not url:
-        print("📡 Keep-alive: No RENDER_EXTERNAL_URL or PUBLIC_URL found. Bot will sleep on Render Free Tier.")
-        return
-        
-    print(f"📡 Keep-alive: Starting self-ping for {url}")
+    print(f"📡 Keep-alive thread started. Monitoring URL: {url or 'NONE'}")
+    
     while True:
-        try:
-            # Wait a few minutes after startup before the first ping
-            time.sleep(300)
-            
-            response = requests.get(url, timeout=10)
-            print(f"📡 Keep-alive: Ping successful! Status: {response.status_code}")
-        except Exception as e:
-            print(f"📡 Keep-alive: Ping failed: {e}")
+        # 1. URL Heartbeat
+        if url:
+            try:
+                # Wait 30s before first ping to allow server boot
+                time.sleep(30)
+                response = requests.get(url, timeout=15)
+                print(f"📡 Web Heartbeat: OK ({response.status_code})")
+            except Exception as e:
+                print(f"📡 Web Heartbeat: FAILED: {e}")
         
-        # Ping every 14 minutes (Render sleeps after 15m inactivity)
-        time.sleep(14 * 60)
+        # 2. Database Heartbeat
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as c:
+                    c.execute("SELECT 1")
+            print("📡 Database Heartbeat: OK")
+        except Exception as e:
+            print(f"📡 Database Heartbeat: FAILED: {e}. Pool will re-init on next request.")
+
+        # Ping every 10 minutes (be slightly faster than Render's 15m timeout)
+        time.sleep(10 * 60)
 # =========================
 # 🚀 START BACKGROUND WORKERS
 # =========================
@@ -5671,11 +5699,15 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         # Silence logging to keep console clean
         return
 
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle health checks in separate threads to prevent blocking."""
+    pass
+
 def run_health_check_server():
     try:
         port = int(os.getenv("PORT", "8080"))
-        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-        print(f"✅ Health check server listening on 0.0.0.0:{port}")
+        server = ThreadedHTTPServer(('0.0.0.0', port), HealthCheckHandler)
+        print(f"✅ Health check server listening on 0.0.0.0:{port} (Threaded)")
         server.serve_forever()
     except Exception as e:
         print(f"❌ Health check server failed: {e}")
@@ -5700,8 +5732,8 @@ if __name__ == "__main__":
     print("Background workers running.")
 
     # Safety delay to allow old instances to shut down on Render
-    print("Waiting for session clearance...")
-    time.sleep(5)
+    print("Waiting 10s for session clearance and port stabilization...")
+    time.sleep(10)
     
     try:
         print("Cleaning up old webhooks...")
