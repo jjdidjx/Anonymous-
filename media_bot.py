@@ -3048,10 +3048,14 @@ def inactivity_scheduler():
 # =========================
 
 def message_map_cleanup_scheduler():
+    MESSAGE_MAP_ROW_CAP = 500_000
+    # Only run the expensive row-cap check once per hour, not every 5 min
+    row_cap_check_interval = 3600
+    last_row_cap_check = 0
 
     while True:
         try:
-            # --- Part 1: Time-based cleanup (remove entries older than MAP_RETENTION_DAYS) ---
+            # --- Part 1: Time-based cleanup (cheap, runs every cycle) ---
             cutoff = int(time.time()) - (MAP_RETENTION_DAYS * 86400)
             while True:
                 with get_connection() as conn:
@@ -3074,36 +3078,49 @@ def message_map_cleanup_scheduler():
                         removed = len(c.fetchall())
                 if removed < MAP_DELETE_BATCH_SIZE:
                     break
+                # Small pause between batches to avoid holding connection too long
+                time.sleep(0.5)
 
-            # --- Part 2: Row-cap cleanup (keep only the newest 500,000 rows) ---
-            MESSAGE_MAP_ROW_CAP = 500_000
-            with get_connection() as conn:
-                with conn.cursor() as c:
-                    c.execute("SELECT COUNT(*) FROM message_map")
-                    total_rows = c.fetchone()[0]
-
-            if total_rows > MESSAGE_MAP_ROW_CAP:
-                excess = total_rows - MESSAGE_MAP_ROW_CAP
-                print(f"[Maintenance] message_map has {total_rows} rows. Pruning {excess} oldest entries.")
+            # --- Part 2: Row-cap cleanup (expensive, runs once per hour max) ---
+            now_ts = time.time()
+            if (now_ts - last_row_cap_check) >= row_cap_check_interval:
+                last_row_cap_check = now_ts
+                # Use fast postgres estimate instead of full COUNT(*) scan
                 with get_connection() as conn:
                     with conn.cursor() as c:
                         c.execute(
-                            """
-                            DELETE FROM message_map
-                            WHERE ctid IN (
-                                SELECT ctid FROM message_map
-                                ORDER BY created_at ASC
-                                LIMIT %s
-                            )
-                            """,
-                            (excess,)
+                            "SELECT reltuples::BIGINT FROM pg_class WHERE relname = 'message_map'"
                         )
-                print(f"[Maintenance] Pruned {excess} rows. message_map is now at cap.")
+                        estimated_rows = c.fetchone()[0]
+
+                if estimated_rows > MESSAGE_MAP_ROW_CAP:
+                    excess = estimated_rows - MESSAGE_MAP_ROW_CAP
+                    print(f"[Maintenance] message_map ~{estimated_rows} rows. Pruning {excess} oldest.")
+                    # Delete in batches to not lock the table for too long
+                    while excess > 0:
+                        batch = min(excess, MAP_DELETE_BATCH_SIZE)
+                        with get_connection() as conn:
+                            with conn.cursor() as c:
+                                c.execute(
+                                    """
+                                    DELETE FROM message_map
+                                    WHERE ctid IN (
+                                        SELECT ctid FROM message_map
+                                        ORDER BY created_at ASC
+                                        LIMIT %s
+                                    )
+                                    """,
+                                    (batch,)
+                                )
+                        excess -= batch
+                        time.sleep(0.5)  # yield between batches
+                    print("[Maintenance] Row-cap pruning complete.")
 
         except Exception as e:
             print("Cleanup error:", e)
 
         time.sleep(MAP_CLEANUP_INTERVAL_SECONDS)
+
 
 
 def hourly_db_backup():
