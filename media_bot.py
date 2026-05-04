@@ -3048,14 +3048,9 @@ def inactivity_scheduler():
 # =========================
 
 def message_map_cleanup_scheduler():
-    MESSAGE_MAP_ROW_CAP = 500_000
-    # Only run the expensive row-cap check once per hour, not every 5 min
-    row_cap_check_interval = 3600
-    last_row_cap_check = 0
 
     while True:
         try:
-            # --- Part 1: Time-based cleanup (cheap, runs every cycle) ---
             cutoff = int(time.time()) - (MAP_RETENTION_DAYS * 86400)
             while True:
                 with get_connection() as conn:
@@ -3078,89 +3073,10 @@ def message_map_cleanup_scheduler():
                         removed = len(c.fetchall())
                 if removed < MAP_DELETE_BATCH_SIZE:
                     break
-                # Small pause between batches to avoid holding connection too long
-                time.sleep(0.5)
-
-            # --- Part 2: Row-cap cleanup (expensive, runs once per hour max) ---
-            now_ts = time.time()
-            if (now_ts - last_row_cap_check) >= row_cap_check_interval:
-                last_row_cap_check = now_ts
-                # Use fast postgres estimate instead of full COUNT(*) scan
-                with get_connection() as conn:
-                    with conn.cursor() as c:
-                        c.execute(
-                            "SELECT reltuples::BIGINT FROM pg_class WHERE relname = 'message_map'"
-                        )
-                        estimated_rows = c.fetchone()[0]
-
-                if estimated_rows > MESSAGE_MAP_ROW_CAP:
-                    excess = estimated_rows - MESSAGE_MAP_ROW_CAP
-                    print(f"[Maintenance] message_map ~{estimated_rows} rows. Pruning {excess} oldest.")
-                    # Delete in batches to not lock the table for too long
-                    while excess > 0:
-                        batch = min(excess, MAP_DELETE_BATCH_SIZE)
-                        with get_connection() as conn:
-                            with conn.cursor() as c:
-                                c.execute(
-                                    """
-                                    DELETE FROM message_map
-                                    WHERE ctid IN (
-                                        SELECT ctid FROM message_map
-                                        ORDER BY created_at ASC
-                                        LIMIT %s
-                                    )
-                                    """,
-                                    (batch,)
-                                )
-                        excess -= batch
-                        time.sleep(0.5)  # yield between batches
-                    print("[Maintenance] Row-cap pruning complete.")
-
         except Exception as e:
             print("Cleanup error:", e)
 
         time.sleep(MAP_CLEANUP_INTERVAL_SECONDS)
-
-
-
-def hourly_db_backup():
-    """Every hour, export the full DB backup and DM it to the first admin."""
-    # Wait 60 minutes before the first backup so the bot has time to fully start
-    time.sleep(3600)
-    while True:
-        try:
-            admin_id = FIRST_ADMIN_ID
-            if not admin_id:
-                print("[Backup] No ADMIN_ID set — skipping hourly backup.")
-            else:
-                payload = export_recovery_payload()
-                import tempfile, json as _json
-                temp_path = None
-                try:
-                    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as f:
-                        _json.dump(payload, f, ensure_ascii=False, indent=2)
-                        temp_path = f.name
-                    with open(temp_path, "rb") as doc:
-                        import datetime as _dt
-                        ts = _dt.datetime.now().strftime('%Y-%m-%d %H:%M')
-                        bot.send_document(
-                            int(admin_id),
-                            doc,
-                            caption=(
-                                f"🗄 *Hourly DB Backup*\n"
-                                f"📅 `{ts}`\n"
-                                f"This file contains all users, VIPs, settings and banned words."
-                            ),
-                            parse_mode="Markdown"
-                        )
-                    print(f"[Backup] Hourly backup sent to admin {admin_id} at {ts}.")
-                finally:
-                    if temp_path and os.path.exists(temp_path):
-                        os.unlink(temp_path)
-        except Exception as e:
-            print(f"[Backup] Hourly backup failed: {e}")
-
-        time.sleep(3600)
 
 
 def force_join_enforcement_scheduler():
@@ -3204,15 +3120,9 @@ def start_background_workers():
         daemon=True
     ).start()
 
-    # Cleanup Scheduler (time-based + 500k row cap)
+    # Cleanup Scheduler
     threading.Thread(
         target=message_map_cleanup_scheduler,
-        daemon=True
-    ).start()
-
-    # Hourly DB Backup to Admin DM
-    threading.Thread(
-        target=hourly_db_backup,
         daemon=True
     ).start()
 
